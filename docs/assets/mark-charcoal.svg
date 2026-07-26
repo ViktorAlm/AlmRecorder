@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="AlmRecorder mark" fill="none" stroke="#2E2D29" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="24" y="7" width="16" height="25" rx="8"/>
+  <g stroke="#7C8A6B" stroke-width="3">
+    <line x1="28" y1="15" x2="36" y2="15"/>
+    <line x1="28" y1="19.5" x2="36" y2="19.5"/>
+    <line x1="28" y1="24" x2="36" y2="24"/>
+  </g>
+  <line x1="30" y1="32" x2="13" y2="57"/>
+  <line x1="34" y1="32" x2="51" y2="57"/>
+  <line x1="20" y1="46" x2="44" y2="46"/>
+</svg>

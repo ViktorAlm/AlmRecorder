@@ -1,0 +1,163 @@
+# ---- Build artifacts ----
+build/
+DerivedData/
+.build/
+*.hmap
+*.ipa
+*.dSYM/
+*.o
+*.a
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+.swiftpm/
+
+# Swift Package Manager
+# NOTE: Package.resolved IS committed (this is an app — pin deps for reproducible builds).
+# NOTE: prebuilt native libs under AlmRecorder/Resources/{Libraries,Binaries} ARE committed
+#       on purpose (Approach 1). Do not add *.dylib here.
+
+# ---- Models (downloaded at runtime, never committed) ----
+*.bin
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# ---- Audio / recordings (never commit user media) ----
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.aiff
+*.caf
+*.m4v
+*.mkv
+*.mov
+*.mp4
+*.ogg
+*.opus
+*.webm
+*.wma
+
+# ---- Local databases and recording-library exports ----
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# ---- Distribution output ----
+dist/
+*.dmg
+*.pkg
+*.zip
+
+# ---- Python (legacy; backend removed) ----
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ---- Editors / local tooling ----
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pem
+*.mobileprovision
+
+# ---- Logs / temp ----
+*.log
+*.tmp
+temp/
+tmp/
+
+# ---- Privacy boundary: never track tests, evals, or user-derived corpora ----
+# Test and evaluation source stays local because fixtures can accidentally retain transcript,
+# speaker, filename, calendar, or identity data. Product evaluation code reads each user's own
+# labels/gold set from the local database; those inputs and outputs are never repository assets.
+/Tests/
+/AlmRecorder/Tests/
+/.local-eval/
+/**/.local-eval/
+/eval-data/
+/evaluation-data/
+/test-data/
+/gold-data/
+/gold-set/
+/fixtures/
+/comparisons/
+/benchmarks/
+
+# Local-only extraction/benchmark utilities and internal work notes.
+/Scripts/extract_speaker_test_set.py
+/Scripts/run_speaker_pipeline_eval.sh
+/docs/dev-notes/
+/docs/plans/
+/docs/superpowers/
+
+# Corpus, annotation, export, and benchmark formats.
+*.jsonl
+*.csv
+*.tsv
+*.rttm
+*.srt
+*.vtt
+*.textgrid
+*transcript*.json
+*transcript*.txt
+*transcription*.json
+*transcription*.txt
+*utterance*.json
+*utterance*.txt
+*recording*.json
+*recording*.txt
+*speaker*gold*.json
+*speaker*benchmark*.json
+*speaker*comparison*.json
+*evaluation*.json
+*eval*.json
+*gold*.json
+*benchmark*.json
+*comparison*.json
+
+# Known local output names (kept explicit for readability and older tooling).
+review_actions.jsonl
+confirmed_recordings.jsonl
+speaker_segments.jsonl
+speaker_candidates.csv
+speaker-pipeline-benchmark.json
+vibevoice-gold-benchmark.json
+
+# Optional exact fingerprints maintained locally by the repository owner.
+.privacy-blocklist

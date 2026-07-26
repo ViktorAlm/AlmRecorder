@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="AlmRecorder">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38362F"/>
+      <stop offset="1" stop-color="#2E2D29"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="27" fill="url(#bg)"/>
+  <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".10"/>
+  <g transform="translate(28,28)" fill="none" stroke="#9DAA85" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="24" y="7" width="16" height="25" rx="8"/>
+    <g stroke-width="3">
+      <line x1="28" y1="15" x2="36" y2="15"/>
+      <line x1="28" y1="19.5" x2="36" y2="19.5"/>
+      <line x1="28" y1="24" x2="36" y2="24"/>
+    </g>
+    <line x1="30" y1="32" x2="13" y2="57"/>
+    <line x1="34" y1="32" x2="51" y2="57"/>
+    <line x1="20" y1="46" x2="44" y2="46"/>
+  </g>
+</svg>

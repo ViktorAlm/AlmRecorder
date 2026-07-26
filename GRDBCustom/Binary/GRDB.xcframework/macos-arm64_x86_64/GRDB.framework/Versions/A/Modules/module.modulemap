@@ -1,0 +1,18 @@
+module CSQLite {
+    header "sqlite3.h"
+    export *
+}
+
+framework module GRDB {
+    umbrella header "GRDB.h"
+    
+    export *
+    module * { export * }
+    
+    header "grdb_config.h"
+}
+
+module GRDB.Swift {
+  header "GRDB-Swift.h"
+  requires objc
+}

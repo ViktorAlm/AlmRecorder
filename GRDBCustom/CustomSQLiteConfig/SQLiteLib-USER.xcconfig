@@ -1,0 +1,3 @@
+// Custom SQLite compilation flags for AlmRecorder
+// Note: there is no space between -D and the option name.
+CUSTOM_SQLLIBRARY_CFLAGS = -DSQLITE_ENABLE_LOAD_EXTENSION -DSQLITE_ENABLE_SNAPSHOT -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_JSON1

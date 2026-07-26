@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlmRecorder — logo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --sage:#7C8A6B; --sage-top:#889677;
+    --blue:#8AA1AD; --blue-top:#97AEB9;
+    --char:#2E2D29; --char-top:#38362F;
+    --cream:#F4EFE3; --paper:#F7F3EA;
+    --brass:#B5894E; --greige:#CFC8B8;
+    --ink:#2E2D29; --ink-soft:#6B675E;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-font-smoothing:antialiased}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:"Schibsted Grotesk",system-ui,sans-serif;
+    line-height:1.5; letter-spacing:-0.01em;
+  }
+  .wrap{max-width:1040px; margin:0 auto; padding:clamp(28px,5vw,72px) clamp(20px,5vw,56px)}
+  .eyebrow{font-size:13px; font-weight:600; letter-spacing:0.14em; text-transform:uppercase; color:var(--ink-soft)}
+  h1{font-size:clamp(34px,6vw,60px); font-weight:600; letter-spacing:-0.03em; margin:.35em 0 .1em; line-height:1.02}
+  h2{font-size:13px; font-weight:600; letter-spacing:0.14em; text-transform:uppercase; color:var(--ink-soft); margin:0 0 22px}
+  .lede{font-size:clamp(16px,2.2vw,19px); color:var(--ink-soft); max-width:52ch; margin:.2em 0 0}
+
+  /* hero */
+  .hero{display:flex; align-items:center; gap:clamp(20px,4vw,44px); flex-wrap:wrap; margin:40px 0 8px}
+  .hero .wordmark{display:flex; align-items:baseline; gap:.06em; font-weight:600; font-size:clamp(30px,5vw,46px); letter-spacing:-0.035em}
+  .hero .wordmark .rec{color:var(--ink-soft); font-weight:400}
+
+  section{margin-top:clamp(48px,8vw,96px)}
+  .rule{height:1px;background:linear-gradient(90deg,var(--greige),transparent);border:0;margin:0}
+
+  /* colorway cards */
+  .ways{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:clamp(18px,3vw,32px)}
+  .way{display:flex; flex-direction:column; gap:18px}
+  .way .stage{display:flex; align-items:center; gap:22px}
+  .way .name{font-weight:600; font-size:17px; letter-spacing:-0.02em}
+  .way .hex{font-size:12.5px; color:var(--ink-soft); letter-spacing:0.02em; margin-top:2px}
+  .swatches{display:flex; gap:7px; margin-top:10px}
+  .sw{width:18px;height:18px;border-radius:50%;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
+
+  /* app icon container */
+  .icon{display:block; filter:drop-shadow(0 10px 22px rgba(46,45,41,.16)) drop-shadow(0 2px 5px rgba(46,45,41,.10))}
+  .flat{display:block}
+
+  /* size ladder */
+  .ladder{display:flex; align-items:flex-end; gap:clamp(20px,4vw,48px); flex-wrap:wrap}
+  .ladder figure{margin:0; display:flex; flex-direction:column; align-items:center; gap:12px}
+  .ladder figcaption{font-size:12px;color:var(--ink-soft)}
+
+  /* dark panel */
+  .dark{background:#26251F; border-radius:24px; padding:clamp(30px,5vw,56px); color:var(--cream)}
+  .dark h2{color:#9a958a}
+  .dark .row{display:flex; align-items:center; gap:clamp(24px,5vw,56px); flex-wrap:wrap}
+  .dark .wordmark{display:flex; align-items:baseline; gap:.06em; font-weight:600; font-size:clamp(26px,4vw,40px); letter-spacing:-0.035em; color:var(--cream)}
+  .dark .wordmark .rec{color:#9a958a; font-weight:400}
+
+  .note{font-size:15px;color:var(--ink-soft);max-width:60ch}
+  footer{margin-top:80px;color:var(--ink-soft);font-size:13px}
+  code{font-family:"Schibsted Grotesk",sans-serif;background:#ECE5D6;padding:1px 6px;border-radius:5px;font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">AlmRecorder · Identity</p>
+  <h1>An <em style="font-style:normal;color:var(--sage)">A</em> built from a microphone.</h1>
+  <p class="lede">The capsule forms the apex; its stand splays into the letter’s legs; the crossbar finishes the A. Refined, geometric, and quiet — in a palette borrowed from Swedish kitchen cabinets.</p>
+
+  <!-- HERO -->
+  <div class="hero">
+    <!-- sage app icon, 132 -->
+    <svg class="icon" width="132" height="132" viewBox="0 0 120 120" role="img" aria-label="AlmRecorder logo">
+      <defs>
+        <linearGradient id="gSage" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#889677"/><stop offset="1" stop-color="#7C8A6B"/>
+        </linearGradient>
+      </defs>
+      <rect width="120" height="120" rx="27" fill="url(#gSage)"/>
+      <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".18"/>
+      <g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="24" y="7" width="16" height="25" rx="8"/>
+        <g stroke-width="3">
+          <line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/>
+        </g>
+        <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/>
+        <line x1="20" y1="46" x2="44" y2="46"/>
+      </g>
+    </svg>
+
+    <div class="wordmark"><span>Alm</span><span class="rec">Recorder</span></div>
+  </div>
+
+  <section>
+    <h2>Three colorways</h2>
+    <div class="ways">
+
+      <!-- SAGE -->
+      <div class="way">
+        <div class="stage">
+          <svg class="icon" width="104" height="104" viewBox="0 0 120 120">
+            <rect width="120" height="120" rx="27" fill="url(#gSage)"/>
+            <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".18"/>
+            <g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="24" y="7" width="16" height="25" rx="8"/>
+              <g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+              <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+            </g>
+          </svg>
+          <!-- flat sage mark -->
+          <svg class="flat" width="60" height="60" viewBox="0 0 64 64" fill="none" stroke="#7C8A6B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="24" y="7" width="16" height="25" rx="8"/>
+            <g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+            <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+          </svg>
+        </div>
+        <div>
+          <div class="name">Sage</div>
+          <div class="hex">#7C8A6B on linseed #F4EFE3</div>
+          <div class="swatches"><span class="sw" style="background:#7C8A6B"></span><span class="sw" style="background:#F4EFE3"></span><span class="sw" style="background:#2E2D29"></span></div>
+        </div>
+      </div>
+
+      <!-- DUSTY BLUE -->
+      <div class="way">
+        <div class="stage">
+          <svg class="icon" width="104" height="104" viewBox="0 0 120 120">
+            <defs><linearGradient id="gBlue" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#97AEB9"/><stop offset="1" stop-color="#8AA1AD"/></linearGradient></defs>
+            <rect width="120" height="120" rx="27" fill="url(#gBlue)"/>
+            <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".18"/>
+            <g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="24" y="7" width="16" height="25" rx="8"/>
+              <g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+              <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+            </g>
+          </svg>
+          <svg class="flat" width="60" height="60" viewBox="0 0 64 64" fill="none" stroke="#7E97A4" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="24" y="7" width="16" height="25" rx="8"/>
+            <g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+            <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+          </svg>
+        </div>
+        <div>
+          <div class="name">Dusty blue</div>
+          <div class="hex">#8AA1AD on linseed #F4EFE3</div>
+          <div class="swatches"><span class="sw" style="background:#8AA1AD"></span><span class="sw" style="background:#F4EFE3"></span><span class="sw" style="background:#2E2D29"></span></div>
+        </div>
+      </div>
+
+      <!-- CHARCOAL + BRASS -->
+      <div class="way">
+        <div class="stage">
+          <svg class="icon" width="104" height="104" viewBox="0 0 120 120">
+            <defs><linearGradient id="gChar" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#38362F"/><stop offset="1" stop-color="#2E2D29"/></linearGradient></defs>
+            <rect width="120" height="120" rx="27" fill="url(#gChar)"/>
+            <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".10"/>
+            <g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="24" y="7" width="16" height="25" rx="8"/>
+              <g stroke-width="3" stroke="#C79A5B"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+              <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+            </g>
+          </svg>
+          <svg class="flat" width="60" height="60" viewBox="0 0 64 64" fill="none" stroke="#2E2D29" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="24" y="7" width="16" height="25" rx="8"/>
+            <g stroke-width="3" stroke="#B5894E"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+            <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+          </svg>
+        </div>
+        <div>
+          <div class="name">Charcoal &amp; brass</div>
+          <div class="hex">#2E2D29 with brass #B5894E grille</div>
+          <div class="swatches"><span class="sw" style="background:#2E2D29"></span><span class="sw" style="background:#B5894E"></span><span class="sw" style="background:#F4EFE3"></span></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>It holds up small</h2>
+    <div class="ladder">
+      <figure><svg class="icon" width="128" height="128" viewBox="0 0 120 120"><rect width="120" height="120" rx="27" fill="url(#gSage)"/><g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><rect x="24" y="7" width="16" height="25" rx="8"/><g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g><line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/></g></svg><figcaption>128</figcaption></figure>
+      <figure><svg class="icon" width="64" height="64" viewBox="0 0 120 120"><rect width="120" height="120" rx="27" fill="url(#gSage)"/><g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"><rect x="24" y="7" width="16" height="25" rx="8"/><g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g><line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/></g></svg><figcaption>64</figcaption></figure>
+      <figure><svg class="icon" width="32" height="32" viewBox="0 0 120 120"><rect width="120" height="120" rx="27" fill="url(#gSage)"/><g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"><rect x="24" y="9" width="16" height="23" rx="8"/><line x1="30" y1="32" x2="14" y2="56"/><line x1="34" y1="32" x2="50" y2="56"/><line x1="21" y1="46" x2="43" y2="46"/></g></svg><figcaption>32</figcaption></figure>
+      <figure><svg class="icon" width="20" height="20" viewBox="0 0 120 120"><rect width="120" height="120" rx="27" fill="#7C8A6B"/><g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"><rect x="25" y="11" width="14" height="21" rx="7"/><line x1="31" y1="32" x2="16" y2="55"/><line x1="33" y1="32" x2="48" y2="55"/><line x1="22" y1="46" x2="42" y2="46"/></g></svg><figcaption>20 · simplified</figcaption></figure>
+    </div>
+    <p class="note" style="margin-top:22px">At favicon sizes the grille drops away and the strokes thicken slightly — the A-microphone silhouette stays legible.</p>
+  </section>
+
+  <section>
+    <div class="dark">
+      <h2>On dark</h2>
+      <div class="row">
+        <svg class="icon" width="104" height="104" viewBox="0 0 120 120">
+          <rect width="120" height="120" rx="27" fill="#34332C"/>
+          <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".12"/>
+          <g transform="translate(28,28)" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="24" y="7" width="16" height="25" rx="8"/>
+            <g stroke-width="3" stroke="#C79A5B"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+            <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+          </g>
+        </svg>
+        <svg width="62" height="62" viewBox="0 0 64 64" fill="none" stroke="#F4EFE3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="24" y="7" width="16" height="25" rx="8"/>
+          <g stroke-width="3"><line x1="28" y1="15" x2="36" y2="15"/><line x1="28" y1="19.5" x2="36" y2="19.5"/><line x1="28" y1="24" x2="36" y2="24"/></g>
+          <line x1="30" y1="32" x2="13" y2="57"/><line x1="34" y1="32" x2="51" y2="57"/><line x1="20" y1="46" x2="44" y2="46"/>
+        </svg>
+        <div class="wordmark"><span>Alm</span><span class="rec">Recorder</span></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>AlmRecorder identity preview · Schibsted Grotesk · palette: Swedish kitchen cabinets</footer>
+</div>
+</body>
+</html>
