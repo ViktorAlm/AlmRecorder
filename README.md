@@ -15,7 +15,7 @@ then search, diarize, and organize. Nothing ever leaves your Mac.
 [![License Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-B5894E?style=flat-square)](LICENSE)
 [![Download](https://img.shields.io/github/v/release/ViktorAlm/AlmRecorder?style=flat-square&label=download&color=2E2D29)](https://github.com/ViktorAlm/AlmRecorder/releases/latest)
 
-[**Download**](https://github.com/ViktorAlm/AlmRecorder/releases/latest) · [Build from source](#build-from-source) · [Contribute](CONTRIBUTING.md)
+[**Download**](https://github.com/ViktorAlm/AlmRecorder/releases/latest) · [User guide](docs/user-guide.md) · [Build from source](#build-from-source) · [Contribute](CONTRIBUTING.md)
 
 </div>
 
@@ -62,6 +62,9 @@ then search, diarize, and organize. Nothing ever leaves your Mac.
    - **System Settings → Privacy & Security** → **Open Anyway**, or
    - Terminal: `xattr -dr com.apple.quarantine /Applications/AlmRecorder.app`
 4. On first run, pick an engine and let the app **download its model**. After that you're fully offline.
+
+For first-run permissions, recording, importing, search, transcript review, backups, MCP, and
+troubleshooting, see the [complete user guide](docs/user-guide.md).
 
 Prefer not to run an unsigned binary? [Build from source](#build-from-source).
 

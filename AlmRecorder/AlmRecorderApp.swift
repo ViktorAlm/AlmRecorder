@@ -186,7 +186,7 @@ struct AlmRecorderApp: App {
             
             CommandGroup(replacing: .help) {
                 Button("AlmRecorder Help") {
-                    if let url = URL(string: "https://github.com/yourusername/AlmRecorder") {
+                    if let url = URL(string: "https://github.com/ViktorAlm/AlmRecorder/blob/main/docs/user-guide.md") {
                         NSWorkspace.shared.open(url)
                     }
                 }
@@ -198,7 +198,7 @@ struct AlmRecorderApp: App {
                 }
                 
                 Button("Report Issue...") {
-                    if let url = URL(string: "https://github.com/yourusername/AlmRecorder/issues") {
+                    if let url = URL(string: "https://github.com/ViktorAlm/AlmRecorder/issues") {
                         NSWorkspace.shared.open(url)
                     }
                 }
