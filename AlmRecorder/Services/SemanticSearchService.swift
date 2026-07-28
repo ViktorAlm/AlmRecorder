@@ -30,10 +30,10 @@ class SemanticSearchService: ObservableObject {
         query: String,
         limit: Int = 20,
         threshold: Float? = nil,
-        loadModelIfNeeded: Bool = true
+        loadModelIfNeeded: Bool = true,
+        publishResults: Bool = true
     ) async throws -> [UtteranceSearchResult] {
         logger.info("[SemanticSearch] === SEMANTIC SEARCH START ===")
-        logger.info("[SemanticSearch] Query: \(query)")
         logger.info("[SemanticSearch] Query length: \(query.count) chars")
         logger.info("[SemanticSearch] Limit: \(limit), Threshold: \(threshold?.description ?? "none")")
         
@@ -108,8 +108,10 @@ class SemanticSearchService: ObservableObject {
             }
             logger.info("[SemanticSearch] === SEMANTIC SEARCH COMPLETE ===")
 
-            await MainActor.run {
-                self.searchResults = results
+            if publishResults {
+                await MainActor.run {
+                    self.searchResults = results
+                }
             }
 
             return results
@@ -118,7 +120,7 @@ class SemanticSearchService: ObservableObject {
             logger.error("[SemanticSearch] === SEARCH FAILED ===")
             logger.error("[SemanticSearch] Error: \(error)")
             logger.error("[SemanticSearch] Error type: \(type(of: error))")
-            logger.error("[SemanticSearch] Query: \(query)")
+            logger.error("[SemanticSearch] Query length: \(query.count) chars")
             logger.error("[SemanticSearch] Model: \(EmbeddingModelManager.shared.currentModel)")
 
             if holdsGPU {
@@ -140,10 +142,11 @@ class SemanticSearchService: ObservableObject {
         limit: Int = 20,
         loadModelIfNeeded: Bool = true,
         speakerIds: [String] = [],
-        forceANN: Bool = false
+        forceANN: Bool = false,
+        publishResults: Bool = true
     ) async throws -> GRDBUtteranceRepository.ScopedVectorSearchResult {
         logger.info("[SemanticSearch] === RECORDING SEARCH START ===")
-        logger.info("[SemanticSearch] Query: \(query)")
+        logger.info("[SemanticSearch] Query length: \(query.count) chars")
         logger.info("[SemanticSearch] Recording IDs: \(recordingIds)")
         logger.info("[SemanticSearch] Limit: \(limit)")
         
@@ -229,8 +232,10 @@ class SemanticSearchService: ObservableObject {
             logger.info("[SemanticSearch] Found \(searchResult.results.count) results | complete=\(searchResult.complete)")
             logger.info("[SemanticSearch] === RECORDING SEARCH COMPLETE ===")
             
-            await MainActor.run {
-                self.searchResults = searchResult.results
+            if publishResults {
+                await MainActor.run {
+                    self.searchResults = searchResult.results
+                }
             }
             
             return searchResult
@@ -238,7 +243,7 @@ class SemanticSearchService: ObservableObject {
         } catch {
             logger.error("[SemanticSearch] === SEARCH FAILED ===")
             logger.error("[SemanticSearch] Error: \(error)")
-            logger.error("[SemanticSearch] Query: \(query)")
+            logger.error("[SemanticSearch] Query length: \(query.count) chars")
             logger.error("[SemanticSearch] Recording IDs: \(recordingIds)")
 
             if holdsGPU {
@@ -255,7 +260,7 @@ class SemanticSearchService: ObservableObject {
     
     /// Traditional text search (fallback when embeddings not available)
     func textSearch(query: String, limit: Int = 20) throws -> [Utterance] {
-        logger.info("[SemanticSearch] Text search: query='\(query)', limit=\(limit)")
+        logger.info("[SemanticSearch] Text search | queryChars=\(query.count) limit=\(limit)")
         do {
             let results = try utteranceRepo.searchByText(query: query, limit: limit)
             logger.info("[SemanticSearch] Text search found \(results.count) results")

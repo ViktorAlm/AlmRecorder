@@ -318,7 +318,8 @@ struct QueueView: View {
     }
     
     private var queueHeader: some View {
-        VStack(spacing: 12) {
+        let deferredJob = queueManager.pendingJobs.first(where: { $0.pendingReason != nil })
+        return VStack(spacing: 12) {
             HStack {
                 Label("Transcription Queue", systemImage: "tray.full")
                     .font(.title2)
@@ -328,7 +329,9 @@ struct QueueView: View {
                 
                 // Start/Resume when there's pending work but nothing is actually running (idle,
                 // paused, OR a stuck "processing" state with no live worker); Pause while running.
-                if !queueManager.pendingJobs.isEmpty && queueManager.activeWorkers == 0 {
+                if deferredJob == nil
+                    && !queueManager.pendingJobs.isEmpty
+                    && queueManager.activeWorkers == 0 {
                     Button(action: { queueManager.startOrResumeProcessing() }) {
                         Label(queueManager.isPaused ? "Resume" : "Start", systemImage: "play.circle.fill")
                             .foregroundColor(.green)
@@ -348,9 +351,22 @@ struct QueueView: View {
                             .foregroundColor(.orange)
                         Text("Queue Paused")
                             .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.orange)
+                        .fontWeight(.medium)
+                        .foregroundColor(.orange)
                     }
+                } else if let deferredJob {
+                    HStack(spacing: 5) {
+                        Image(systemName: deferredJob.isWaitingForSafeMemory
+                              ? "memorychip"
+                              : "clock.badge.exclamationmark")
+                        Text(deferredJob.isWaitingForSafeMemory
+                             ? "Waiting for safe memory"
+                             : "Waiting")
+                    }
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.orange)
+                    .help(deferredJob.pendingReason ?? "")
                 } else if queueManager.isProcessing {
                     HStack(spacing: 8) {
                         // Processing indicator
@@ -400,6 +416,17 @@ struct QueueView: View {
                                     .foregroundColor(.blue)
                                     .monospacedDigit()
                             }
+                        } else if let deferredJob,
+                                  let reason = deferredJob.pendingReasonDetail {
+                            HStack(spacing: 5) {
+                                Image(systemName: deferredJob.isWaitingForSafeMemory
+                                      ? "memorychip"
+                                      : "exclamationmark.triangle.fill")
+                                Text(reason)
+                                    .lineLimit(2)
+                            }
+                            .font(.caption)
+                            .foregroundColor(.orange)
                         }
                         
                         Spacer()
@@ -568,7 +595,10 @@ struct QueueView: View {
                         
                         Spacer()
                         
-                        JobStatusBadge(status: job.status)
+                        JobStatusBadge(
+                            status: job.status,
+                            isWaiting: job.pendingReason != nil
+                        )
                     }
                     
                     HStack {
@@ -590,6 +620,48 @@ struct QueueView: View {
                 }
                 
                 Divider()
+
+                if let reason = job.pendingReasonDetail {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(reason)
+                                .font(.callout)
+                                .foregroundColor(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                    .foregroundColor(.orange)
+                                Text("AlmRecorder will check again automatically. This job has not failed, and waiting does not use a retry.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            if job.isWaitingForSafeMemory {
+                                Divider()
+                                MemoryUsageBreakdownView(
+                                    profile: .forSelection(
+                                        job.runSettings.engineSelection
+                                    )
+                                )
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } label: {
+                        Label(
+                            job.isWaitingForSafeMemory
+                                ? "Waiting for safe memory"
+                                : "Why this job is waiting",
+                            systemImage: job.isWaitingForSafeMemory
+                                ? "memorychip"
+                                : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.orange)
+                    }
+                }
                 
                 // Progress section
                 if job.status == .processing || job.status == .waitingForModel {
@@ -1098,7 +1170,7 @@ struct JobRow: View {
     
     var body: some View {
         Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(job.fileName)
@@ -1166,7 +1238,22 @@ struct JobRow: View {
                 } else {
                     JobStatusIndicator(status: job.status)
                 }
-            }
+                }
+
+                if let reason = job.pendingReasonDetail {
+                    HStack(alignment: .top, spacing: 5) {
+                        Image(systemName: job.isWaitingForSafeMemory
+                              ? "memorychip"
+                              : "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .padding(.top, 1)
+                        Text(reason)
+                            .font(.caption2)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundColor(.orange)
+                }
             
             // Add progress bar for processing jobs
             if job.status == .processing {
@@ -1216,6 +1303,265 @@ struct JobRow: View {
         case .finalizing:
             return .indigo
         }
+    }
+}
+
+private struct MemoryUsageBreakdownView: View {
+    let profile: TranscriptionResourceProfile
+
+    @State private var snapshot: MemoryDiagnosticsSnapshot?
+    @State private var isRefreshing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Memory readiness and usage", systemImage: "memorychip")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+
+                Spacer()
+
+                Button {
+                    Task { await refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .help("Refresh memory usage")
+            }
+
+            if let system = snapshot?.system {
+                memoryReadiness(system)
+
+                HStack(spacing: 8) {
+                    memoryMetric(
+                        "Safe headroom",
+                        bytes: system.availableBytes,
+                        color: .blue
+                    )
+                    memoryMetric(
+                        "Compressed",
+                        bytes: system.compressorBytes,
+                        color: .orange
+                    )
+                    if let swap = system.swapUsedBytes {
+                        memoryMetric("Swap", bytes: swap, color: .purple)
+                    }
+                }
+            }
+
+            if let consumers = snapshot?.consumers, !consumers.isEmpty {
+                let largest = max(
+                    consumers.first?.physicalFootprintBytes ?? 1,
+                    1
+                )
+                VStack(alignment: .leading, spacing: 7) {
+                    Label(
+                        "Largest memory users right now",
+                        systemImage: "chart.bar.fill"
+                    )
+                    .font(.caption)
+                    .fontWeight(.semibold)
+
+                    ForEach(consumers) { consumer in
+                        VStack(spacing: 3) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(consumer.applicationName)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                    if consumer.processCount > 1 {
+                                        Text("\(consumer.processCount) processes")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                Text(formatBytes(consumer.physicalFootprintBytes))
+                                    .font(.system(.caption, design: .rounded))
+                                    .fontWeight(.medium)
+                                    .monospacedDigit()
+                            }
+                            ProgressView(
+                                value: Double(consumer.physicalFootprintBytes),
+                                total: Double(largest)
+                            )
+                            .tint(.orange.opacity(0.8))
+                        }
+                    }
+                }
+            } else if isRefreshing {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading process memory…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Text("Process memory details are unavailable.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Text("Approximate physical footprint, grouped by application. macOS cannot attribute compressed memory and swap exactly, so app totals will not equal the system totals.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .task {
+            await refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                guard !Task.isCancelled else { break }
+                await refresh()
+            }
+        }
+    }
+
+    private func memoryReadiness(_ system: SystemMemorySnapshot) -> some View {
+        let requirements = TranscriptionMemoryAdmission.requirements(
+            snapshot: system,
+            profile: profile
+        )
+        let readiness = requirements.readiness(for: system)
+        let percentage = Int((readiness * 100).rounded())
+        let headroomShortfall = requirements.headroomShortfall(for: system)
+        let compressorExcess = requirements.compressorExcess(for: system)
+        let swapExcess = requirements.swapExcess(for: system)
+        let physicalShortfall = requirements.physicalMemoryShortfall(for: system)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(profile.label) memory readiness")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Text(
+                        "\(formatBytes(profile.estimatedPeakBytes)) estimated peak + "
+                            + "\(formatBytes(requirements.launchReserveBytes)) safety buffer"
+                    )
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Text("\(percentage)%")
+                    .font(.system(.title3, design: .rounded))
+                    .fontWeight(.bold)
+                    .foregroundColor(readiness >= 1 ? .green : .orange)
+                    .monospacedDigit()
+            }
+
+            ProgressView(value: readiness)
+                .tint(readiness >= 1 ? .green : .orange)
+
+            HStack {
+                Text("\(formatBytes(system.availableBytes)) safe now")
+                Spacer()
+                Text("\(formatBytes(requirements.requiredHeadroomBytes)) needed")
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+            .monospacedDigit()
+
+            if headroomShortfall > 0 {
+                requirementWarning(
+                    "Need \(formatBytes(headroomShortfall)) more safe headroom."
+                )
+            }
+            if compressorExcess > 0,
+               let compressorLimit = requirements.compressorLimitBytes {
+                requirementWarning(
+                    "Compressed memory must fall by \(formatBytes(compressorExcess)) "
+                        + "(maximum \(formatBytes(compressorLimit)))."
+                )
+            }
+            if swapExcess > 0,
+               let swapLimit = requirements.swapLimitBytes {
+                requirementWarning(
+                    "Swap must fall by \(formatBytes(swapExcess)) "
+                        + "(maximum \(formatBytes(swapLimit)))."
+                )
+            }
+            if physicalShortfall > 0 {
+                requirementWarning(
+                    "This model needs \(formatBytes(physicalShortfall)) more physical "
+                        + "memory including the system reserve."
+                )
+            }
+            if headroomShortfall == 0,
+               compressorExcess == 0,
+               swapExcess == 0,
+               physicalShortfall == 0 {
+                Label("Memory targets are met; the queue will retry automatically.", systemImage: "checkmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundColor(.green)
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(readiness >= 1 ? 0.04 : 0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(
+                    readiness >= 1
+                        ? Color.green.opacity(0.25)
+                        : Color.orange.opacity(0.3)
+                )
+        )
+        .cornerRadius(8)
+    }
+
+    private func requirementWarning(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 5) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundColor(.orange)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.caption2)
+    }
+
+    private func memoryMetric(
+        _ label: String,
+        bytes: UInt64,
+        color: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text(formatBytes(bytes))
+                .font(.system(.caption, design: .rounded))
+                .fontWeight(.semibold)
+                .foregroundColor(color)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.1))
+        .cornerRadius(6)
+    }
+
+    @MainActor
+    private func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        let updated = await Task.detached(priority: .utility) {
+            SystemMemoryDiagnostics.capture()
+        }.value
+        if !Task.isCancelled {
+            snapshot = updated
+        }
+        isRefreshing = false
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .memory
+        return formatter.string(fromByteCount: Int64(clamping: bytes))
     }
 }
 
@@ -1277,11 +1623,12 @@ struct JobStatusIndicator: View {
 
 struct JobStatusBadge: View {
     let status: TranscriptionJob.JobStatus
+    let isWaiting: Bool
     
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: statusIcon)
-            Text(status.rawValue)
+            Text(isWaiting ? "Waiting" : status.rawValue)
         }
         .font(.caption)
         .fontWeight(.medium)
@@ -1293,6 +1640,7 @@ struct JobStatusBadge: View {
     }
     
     private var statusIcon: String {
+        if isWaiting { return "clock.badge.exclamationmark" }
         switch status {
         case .pending:
             return "clock"
@@ -1316,6 +1664,7 @@ struct JobStatusBadge: View {
     }
     
     private var statusColor: Color {
+        if isWaiting { return .orange }
         switch status {
         case .pending:
             return .secondary

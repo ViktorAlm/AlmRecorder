@@ -186,6 +186,16 @@ class TranscriptionService: ObservableObject {
     ) async throws -> String {
         logger.info("[TranscriptionService] Starting transcription for: \(audioFile)")
         logger.info("[TranscriptionService] Current backend: \(currentBackend)")
+
+        // Direct/menu-bar calls do not necessarily pass through TranscriptionQueueManager. Keep a
+        // final fail-closed admission check here so every backend is protected at the point where
+        // it is about to map model weights.
+        let resourceProfile = TranscriptionResourceProfile.forSelection(engineSelection)
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: resourceProfile
+        ) {
+            throw TranscriptionError.resourcesUnavailable(deferral.reason)
+        }
         
         switch currentBackend {
         case .whisper:

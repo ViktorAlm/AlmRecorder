@@ -9,9 +9,11 @@ final class SpeakerEvaluationSettingsModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isEvaluating = false
     @Published private(set) var isSavingPair = false
+    @Published private(set) var isApplyingReconciliation = false
     @Published private(set) var benchmarkProgress: SpeakerEvaluationBenchmarkProgress?
     @Published private(set) var vibeVoiceBenchmarkProgress: VibeVoiceGoldBenchmarkProgress?
     @Published var errorMessage: String?
+    @Published var reconciliationMessage: String?
 
     private var reloadTask: Task<Void, Never>?
     private var evaluationTask: Task<Void, Never>?
@@ -72,7 +74,8 @@ final class SpeakerEvaluationSettingsModel: ObservableObject {
                     try SpeakerPairGoldStore.save(
                         leftClusterId: candidate.left.id,
                         rightClusterId: candidate.right.id,
-                        verdict: verdict
+                        verdict: verdict,
+                        role: candidate.goldRole
                     )
                 }.value
                 lastPairAction = (
@@ -201,6 +204,63 @@ final class SpeakerEvaluationSettingsModel: ObservableObject {
 
     func cancelEvaluation() {
         evaluationTask?.cancel()
+    }
+
+    func applyReconciliation(_ report: GlobalSpeakerReconciliationShadowReport) {
+        guard !isApplyingReconciliation else { return }
+        isApplyingReconciliation = true
+        errorMessage = nil
+        reconciliationMessage = nil
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try GlobalSpeakerLibraryReconciliation.apply(expectedReport: report)
+                }.value
+                SpeakerPipelineSettings.shared.continuousReconciliationEnabled = true
+                reconciliationMessage = "Applied \(result.changedClusterCount) local voice changes. Created \(result.createdIdentityCount) new identities and retired \(result.retiredIdentityCount)."
+                pairWorkspace = try await Task.detached(priority: .utility) {
+                    try SpeakerPairGoldStore.loadWorkspace()
+                }.value
+                snapshot = try await Task.detached(priority: .utility) {
+                    try SpeakerEvaluationWorkspace.loadSnapshot()
+                }.value
+            } catch {
+                errorMessage = "Global reconciliation was not applied: \(error.localizedDescription)"
+            }
+            isApplyingReconciliation = false
+        }
+    }
+
+    func undoLatestReconciliation() {
+        guard !isApplyingReconciliation else { return }
+        isApplyingReconciliation = true
+        errorMessage = nil
+        reconciliationMessage = nil
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try GlobalSpeakerLibraryReconciliation.undoLatest()
+                }.value
+                if let result {
+                    SpeakerPipelineSettings.shared.continuousReconciliationEnabled = false
+                    reconciliationMessage = "Restored \(result.restoredClusterCount) local voices"
+                        + (result.skippedClusterCount > 0
+                            ? "; \(result.skippedClusterCount) newer manual changes were preserved."
+                            : ".")
+                } else {
+                    reconciliationMessage = "There is no active reconciliation run to undo."
+                }
+                pairWorkspace = try await Task.detached(priority: .utility) {
+                    try SpeakerPairGoldStore.loadWorkspace()
+                }.value
+                snapshot = try await Task.detached(priority: .utility) {
+                    try SpeakerEvaluationWorkspace.loadSnapshot()
+                }.value
+            } catch {
+                errorMessage = "Could not undo reconciliation: \(error.localizedDescription)"
+            }
+            isApplyingReconciliation = false
+        }
     }
 
     private func run(profiles: [SpeakerPipelineProfile]) {
@@ -342,6 +402,8 @@ struct SpeakerEvaluationSettingsView: View {
     @State private var searchText = ""
     @State private var selectedRecording: Recording?
     @State private var vibeVoiceGoldRecordingID: Int64?
+    @State private var reconciliationToApply: GlobalSpeakerReconciliationShadowReport?
+    @State private var showReconciliationConfirmation = false
 
     private var summary: SpeakerEvaluationSummary {
         model.snapshot?.summary ?? SpeakerEvaluationSummary()
@@ -428,6 +490,14 @@ struct SpeakerEvaluationSettingsView: View {
                 if let error = model.errorMessage {
                     errorBanner(error)
                 }
+                if let message = model.reconciliationMessage {
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .font(.callout)
+                        .foregroundColor(.green)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
                 datasetSection
                 pairReviewSection
                 labelingQueueSection
@@ -443,6 +513,25 @@ struct SpeakerEvaluationSettingsView: View {
         }
         .sheet(item: $selectedRecording, onDismiss: model.reload) { recording in
             RecordingDetailSheet(recording: recording)
+        }
+        .confirmationDialog(
+            "Apply global speaker reconciliation?",
+            isPresented: $showReconciliationConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Apply reversible changes") {
+                if let report = reconciliationToApply {
+                    model.applyReconciliation(report)
+                }
+                reconciliationToApply = nil
+            }
+            Button("Cancel", role: .cancel) {
+                reconciliationToApply = nil
+            }
+        } message: {
+            Text(
+                "This can split contaminated automatic identities and merge matching voices across recordings. Manual and gold assignments are protected. The complete run can be undone."
+            )
         }
         .onDisappear { pairPlayer.stop() }
     }
@@ -624,6 +713,12 @@ struct SpeakerEvaluationSettingsView: View {
                             Text("\(workspace.counts.scored) scored pair\(workspace.counts.scored == 1 ? "" : "s")")
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(.green)
+                            Text(
+                                "\(workspace.developmentCounts.scored) calibration · "
+                                    + "\(workspace.heldOutCounts.scored) held-out"
+                            )
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                             if workspace.multipleSpeakerClipCount > 0 {
                                 Text(
                                     "\(workspace.multipleSpeakerClipCount) multi-speaker clip"
@@ -646,6 +741,33 @@ struct SpeakerEvaluationSettingsView: View {
                 }
                 .padding(10)
                 .background(.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+
+                if let counts = model.pairWorkspace?.heldOutCounts,
+                   counts.samePerson < 3 || counts.differentPeople < 3 {
+                    let missingSame = max(0, 3 - counts.samePerson)
+                    let missingDifferent = max(0, 3 - counts.differentPeople)
+                    Label(
+                        [
+                            missingSame > 0
+                                ? "\(missingSame) held-out Same"
+                                : nil,
+                            missingDifferent > 0
+                                ? "\(missingDifferent) held-out Different"
+                                : nil,
+                        ]
+                        .compactMap { $0 }
+                        .joined(separator: " and ")
+                            + " answer"
+                            + (missingSame + missingDifferent == 1 ? "" : "s")
+                            + " needed before automatic global reconciliation",
+                        systemImage: "target"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.purple)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
 
                 if model.isLoading && model.pairWorkspace == nil {
                     ProgressView("Finding the most informative voice pairs…")
@@ -688,8 +810,24 @@ struct SpeakerEvaluationSettingsView: View {
                         .font(.caption)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Are Voice A and Voice B the same real person?")
-                                .font(.subheadline.weight(.semibold))
+                            HStack {
+                                Text("Are Voice A and Voice B the same real person?")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(candidate.goldRole.displayName)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundColor(
+                                        candidate.goldRole == .heldOut ? .purple : .blue
+                                    )
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        (candidate.goldRole == .heldOut
+                                            ? Color.purple
+                                            : Color.blue
+                                        ).opacity(0.10),
+                                        in: Capsule()
+                                    )
+                            }
                             Text("Only answer when each clip contains one person. Otherwise mark the affected clip above.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -869,24 +1007,16 @@ struct SpeakerEvaluationSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
             HStack {
-                Label("Global reconciliation · shadow", systemImage: "point.3.connected.trianglepath.dotted")
+                Label("Global reconciliation · preview", systemImage: "point.3.connected.trianglepath.dotted")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Text(
-                    report.learnedCalibration
-                        ? (
-                            report.automaticAcousticMergeCount > 0
-                                ? "Gold-calibrated · shadow"
-                                : "Gold-calibrated · safely abstaining"
-                        )
-                        : "Needs more pair gold"
+                    report.canApply
+                        ? "Held-out safety gate passed"
+                        : "Preview only"
                 )
                     .font(.caption2.weight(.semibold))
-                    .foregroundColor(
-                        report.learnedCalibration && report.automaticAcousticMergeCount > 0
-                            ? .green
-                            : .orange
-                    )
+                    .foregroundColor(report.canApply ? .green : .orange)
             }
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
                 GridRow {
@@ -910,8 +1040,13 @@ struct SpeakerEvaluationSettingsView: View {
                 GridRow {
                     Text("Calibration pairs")
                     Text(report.trainingPairCount.formatted()).monospacedDigit()
-                    Text("Acoustic merge steps")
-                    Text(report.automaticAcousticMergeCount.formatted()).monospacedDigit()
+                    Text("Learned merge threshold")
+                    Text(
+                        report.calibratedMergeProbability.formatted(
+                            .number.precision(.fractionLength(3))
+                        )
+                    )
+                    .monospacedDigit()
                 }
                 GridRow {
                     Text("Same / different gold")
@@ -920,16 +1055,84 @@ struct SpeakerEvaluationSettingsView: View {
                             + report.differentPeoplePairCount.formatted()
                     )
                     .monospacedDigit()
+                    Text("Acoustic merge steps")
+                    Text(report.automaticAcousticMergeCount.formatted()).monospacedDigit()
+                }
+                GridRow {
+                    Text("Held-out safety pairs")
+                    Text(
+                        "\(report.heldOutSamePersonPairCount) same / "
+                            + "\(report.heldOutDifferentPeoplePairCount) different"
+                    )
+                    .monospacedDigit()
+                    Text("Held-out false merges")
+                    Text(report.heldOutFalseMergePairs.formatted())
+                        .monospacedDigit()
+                        .foregroundColor(
+                            report.heldOutFalseMergePairs == 0 ? .green : .red
+                        )
+                }
+                GridRow {
+                    Text("Held-out accuracy")
+                    Text(
+                        report.heldOutAccuracy?.formatted(
+                            .percent.precision(.fractionLength(1))
+                        ) ?? "Not enough data"
+                    )
+                    .monospacedDigit()
+                    Text("Held-out false splits")
+                    Text(report.heldOutFalseSplitPairs.formatted()).monospacedDigit()
+                }
+                GridRow {
                     Text("Constraint conflicts")
                     Text(report.constraintConflictCount.formatted()).monospacedDigit()
+                    Text("")
+                    Text("")
                 }
             }
             .font(.caption)
+            if report.applyBlockers.isEmpty {
+                Label(
+                    "Calibration and held-out safety gates passed. Manual/gold assignments remain locked.",
+                    systemImage: "checkmark.shield.fill"
+                )
+                .font(.caption)
+                .foregroundColor(.green)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(report.applyBlockers, id: \.self) {
+                        Label($0, systemImage: "lock.fill")
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.orange)
+            }
+            HStack {
+                Button {
+                    reconciliationToApply = report
+                    showReconciliationConfirmation = true
+                } label: {
+                    Label("Apply reconciliation", systemImage: "arrow.triangle.merge")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!report.canApply || model.isApplyingReconciliation)
+
+                Button {
+                    model.undoLatestReconciliation()
+                } label: {
+                    Label("Undo latest run", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(model.isApplyingReconciliation)
+
+                if model.isApplyingReconciliation {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+            }
             Text(
-                "This rebuild ignores old automatic merges, preserves only manual/gold anchors, "
-                    + "and enforces Same/Different plus overlap constraints. It is read-only until "
-                    + "held-out gold improves with no additional false merges. Acoustic merge steps "
-                    + "exclude joins forced directly by your Same answers."
+                "The preview rebuilds from immutable recording-local voices, ignores legacy automatic "
+                    + "merges, enforces Same/Different and overlap constraints, and stores a complete "
+                    + "undo snapshot before changing People."
             )
             .font(.caption2)
             .foregroundColor(.secondary)

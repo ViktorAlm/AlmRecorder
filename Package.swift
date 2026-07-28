@@ -9,6 +9,35 @@ let almRecorderExcludes = [
     "Resources/AppIcon.icns"
 ] + (FileManager.default.fileExists(atPath: "AlmRecorder/Tests") ? ["Tests"] : [])
 
+// Real evaluation fixtures can contain transcripts, filenames, speaker identities, and audio.
+// Every developer supplies their own ignored `Tests/AlmRecorderTests` tree; SwiftPM discovers and
+// runs it when present, while public/clean checkouts remain buildable without private data.
+let developerPrivateTestTargets: [Target] =
+    (FileManager.default.fileExists(atPath: "Tests/AlmRecorderTests")
+    ? [
+        .testTarget(
+            name: "AlmRecorderTests",
+            dependencies: [
+                "AlmRecorder",
+                "AlmRecorderMCPProtocol",
+                "AlmRecorderEvaluationKit",
+                .product(name: "GRDB", package: "GRDBCustom"),
+                .product(name: "FluidAudio", package: "FluidAudio")
+            ],
+            path: "Tests/AlmRecorderTests"
+        )
+    ]
+    : [])
+    + (FileManager.default.fileExists(atPath: "Tests/AlmRecorderMemorySafetyTests")
+    ? [
+        .testTarget(
+            name: "AlmRecorderMemorySafetyTests",
+            dependencies: ["AlmRecorder"],
+            path: "Tests/AlmRecorderMemorySafetyTests"
+        )
+    ]
+    : [])
+
 let package = Package(
     name: "AlmRecorder",
     platforms: [
@@ -71,8 +100,30 @@ let package = Package(
                 .copy("Resources/Libraries"),
                 .copy("Resources/Binaries"),
                 .copy("Resources/Models"),
-                .copy("Resources/Python")
+                .copy("Resources/Python"),
+                .copy("Resources/Licenses")
             ]
+        ),
+        .testTarget(
+            name: "AlmRecorderSpeakerSafetyTests",
+            dependencies: ["AlmRecorder"],
+            path: "DeveloperTests/AlmRecorderSpeakerSafetyTests"
+        ),
+        .testTarget(
+            name: "AlmRecorderSearchTests",
+            dependencies: [
+                "AlmRecorder",
+                .product(name: "GRDB", package: "GRDBCustom")
+            ],
+            path: "DeveloperTests/AlmRecorderSearchTests"
+        ),
+        .testTarget(
+            name: "AlmRecorderMCPPrivacyTests",
+            dependencies: [
+                "AlmRecorder",
+                .product(name: "GRDB", package: "GRDBCustom")
+            ],
+            path: "DeveloperTests/AlmRecorderMCPPrivacyTests"
         )
-    ]
+    ] + developerPrivateTestTargets
 )

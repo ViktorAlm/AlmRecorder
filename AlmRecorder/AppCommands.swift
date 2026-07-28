@@ -153,7 +153,7 @@ struct AppCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: .command)
         }
-        
+
         // Recording Menu
         CommandMenu("Recording") {
             Button("Start Recording") {
@@ -176,26 +176,15 @@ struct AppCommands: Commands {
         
         // Search Menu
         CommandMenu("Search") {
-            Button("Semantic Search...") {
+            Button("Search Transcripts...") {
                 navigationSelection?.wrappedValue = .search
-                // This will open search view in semantic mode
-            }
-            .keyboardShortcut("f", modifiers: [.command, .shift])
-            
-            Button("Text Search...") {
-                navigationSelection?.wrappedValue = .search
-                // This will open search view in text mode
             }
             .keyboardShortcut("f", modifiers: .command)
-            
+
             Divider()
-            
-            Button("Search in Library") {
+
+            Button("Open Library") {
                 navigationSelection?.wrappedValue = .library
-            }
-            
-            Button("Search in History") {
-                navigationSelection?.wrappedValue = .history
             }
         }
         
@@ -221,86 +210,75 @@ struct AppCommands: Commands {
             .keyboardShortcut("q", modifiers: .command)
         }
         
-        // View Menu
-        CommandMenu("View") {
+        // Add destinations to the native View menu instead of creating a second "View" menu.
+        CommandGroup(after: .sidebar) {
             Button("Show Dashboard") {
                 navigationSelection?.wrappedValue = .dashboard
             }
             .keyboardShortcut("1", modifiers: .command)
 
-            Button("Show Search") {
-                navigationSelection?.wrappedValue = .search
-            }
-            .keyboardShortcut("2", modifiers: .command)
-
             Button("Show Recording") {
                 navigationSelection?.wrappedValue = .record
             }
+            .keyboardShortcut("2", modifiers: .command)
+
+            Button("Show Library") {
+                navigationSelection?.wrappedValue = .library
+            }
             .keyboardShortcut("3", modifiers: .command)
 
-            Button("Show Queue") {
-                navigationSelection?.wrappedValue = .queue
+            Button("Show Search") {
+                navigationSelection?.wrappedValue = .search
             }
             .keyboardShortcut("4", modifiers: .command)
 
             Divider()
 
-            Button("Show Library") {
-                navigationSelection?.wrappedValue = .library
-            }
-
-            Button("Show History") {
-                navigationSelection?.wrappedValue = .history
-            }
-
-            Button("Show Voice Memos") {
-                navigationSelection?.wrappedValue = .voiceMemos
-            }
-
-            Button("Show Prompt Lab") {
-                navigationSelection?.wrappedValue = .promptLab
-            }
-        }
-        
-        // Database Menu
-        CommandMenu("Database") {
-            Button("Clear All Data...") {
-                clearDatabase()
-            }
-            .keyboardShortcut("k", modifiers: [.command, .shift, .option])
-            
-            Button("Reset Database...") {
-                resetDatabase()
-            }
-            
-            Divider()
-            
-            Button("Vacuum Database") {
-                vacuumDatabase()
-            }
-            
-            Button("Show Database Info") {
-                showDatabaseInfo()
+            Button("Show Queue") {
+                navigationSelection?.wrappedValue = .queue
             }
         }
 
-        CommandMenu("Evaluation") {
-            Button(
-                vibeVoiceBenchmarkRunner.isRunning
-                    ? vibeVoiceBenchmarkRunner.status
-                    : "Compare 3 Calls: Whisper vs 4-bit Fused"
-            ) {
-                vibeVoiceBenchmarkRunner.runThreeCallFourBitComparison()
-            }
-            .keyboardShortcut("v", modifiers: [.command, .option])
-            .disabled(
-                vibeVoiceBenchmarkRunner.isRunning
-                    || !VibeVoiceModelManager.shared.isModelDownloaded(.fourBit)
-            )
+        if FeatureFlags.developerTools {
+            CommandMenu("Database") {
+                Button("Clear All Data...") {
+                    clearDatabase()
+                }
+                .keyboardShortcut("k", modifiers: [.command, .shift, .option])
 
-            if let error = vibeVoiceBenchmarkRunner.errorMessage {
+                Button("Reset Database...") {
+                    resetDatabase()
+                }
+
                 Divider()
-                Text(error)
+
+                Button("Vacuum Database") {
+                    vacuumDatabase()
+                }
+
+                Button("Show Database Info") {
+                    showDatabaseInfo()
+                }
+            }
+
+            CommandMenu("Evaluation") {
+                Button(
+                    vibeVoiceBenchmarkRunner.isRunning
+                        ? vibeVoiceBenchmarkRunner.status
+                        : "Compare 3 Calls: Whisper vs 4-bit Fused"
+                ) {
+                    vibeVoiceBenchmarkRunner.runThreeCallFourBitComparison()
+                }
+                .keyboardShortcut("v", modifiers: [.command, .option])
+                .disabled(
+                    vibeVoiceBenchmarkRunner.isRunning
+                        || !VibeVoiceModelManager.shared.isModelDownloaded(.fourBit)
+                )
+
+                if let error = vibeVoiceBenchmarkRunner.errorMessage {
+                    Divider()
+                    Text(error)
+                }
             }
         }
         

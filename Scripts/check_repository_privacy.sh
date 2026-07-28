@@ -25,6 +25,14 @@ path_is_forbidden() {
     local lowercase_path
     lowercase_path="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
 
+    # Reviewed, synthetic regression tests are intentionally public. They remain subject to every
+    # content scanner below; only the blanket path/test-source bans are waived for this directory.
+    case "$lowercase_path" in
+        developertests/*)
+            return 1
+            ;;
+    esac
+
     case "$lowercase_path" in
         tests/*|*/tests/*|test/*|*/test/*|fixtures/*|*/fixtures/*|\
         .local-eval/*|*/.local-eval/*|eval-data/*|*/eval-data/*|\
@@ -124,7 +132,7 @@ scan_test_constructs() {
     local matches
     matches="$(git grep "${revision_args[@]}" -I -n -E \
         '(^|[^A-Za-z])(XCTest|PreviewProvider)([^A-Za-z]|$)|#Preview' -- \
-        '*.swift' 2>/dev/null || true)"
+        '*.swift' ':!DeveloperTests/**' 2>/dev/null || true)"
     if [[ -n "$matches" ]]; then
         report_failure "tracked Swift source contains test or preview constructs"
     fi

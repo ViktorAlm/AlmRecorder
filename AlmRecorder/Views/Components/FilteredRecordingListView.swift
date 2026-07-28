@@ -2,17 +2,19 @@ import SwiftUI
 
 struct FilteredRecordingListView: View {
     let recordings: [Recording]
+    var showsCount = true
     let onSelect: (Recording) -> Void
 
     @Environment(\.colorScheme) var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Count header
-            Text("\(recordings.count) recording\(recordings.count == 1 ? "" : "s")")
-                .font(.subheadline)
-                .fontWeight(.medium)
-                .foregroundColor(.secondary)
+            if showsCount {
+                Text("\(recordings.count) recording\(recordings.count == 1 ? "" : "s")")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundColor(.secondary)
+            }
 
             if recordings.isEmpty {
                 emptyState

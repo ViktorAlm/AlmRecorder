@@ -190,7 +190,7 @@ class EmbeddingService: ObservableObject {
                 // of burying it as a per-utterance nil and grinding on into a starved GPU.
                 if case TranscriptionError.gpuOutOfMemory = error { throw error }
                 logger.error("[EmbeddingService] Failed to generate embedding for text \(index): \(error)")
-                logger.error("[EmbeddingService] Text preview: \(String(text.prefix(100)))...")
+                logger.error("[EmbeddingService] Failed input length: \(text.count) chars")
                 // Signal failure with nil - do NOT store a placeholder vector.
                 embeddings.append(nil)
             }
@@ -256,7 +256,7 @@ class EmbeddingService: ObservableObject {
                 
                 self.logger.info("[EmbeddingService] === LLAMA-EMBEDDING COMMAND ===")
                 self.logger.info("[EmbeddingService] Executable: \(self.embeddingBinaryPath)")
-                self.logger.info("[EmbeddingService] Arguments: \(process.arguments?.joined(separator: " ") ?? "none")")
+                self.logger.info("[EmbeddingService] Arguments prepared (prompt redacted)")
                 self.logger.info("[EmbeddingService] Model exists: \(FileManager.default.fileExists(atPath: modelPath))")
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: modelPath) {
                     let sizeMB = (attrs[.size] as? Int64 ?? 0) / 1024 / 1024

@@ -701,8 +701,8 @@ public enum AlmRecorderMCPContract {
             ),
             "results": Schema.array(searchHitSchema, maxItems: 50),
             "semantic_search_ready": Schema.boolean("Whether semantic search was ready."),
-            "indexed_utterance_count": Schema.integer("Indexed visible utterance count.", minimum: 0),
-            "visible_utterance_count": Schema.integer("Total visible utterance count.", minimum: 0),
+            "indexed_utterance_count": Schema.integer("Indexed MCP-visible utterance count.", minimum: 0),
+            "visible_utterance_count": Schema.integer("Total MCP-visible utterance count.", minimum: 0),
             "eligible_visible_utterance_count": Schema.integer(
                 "Visible utterances remaining after all recording and speaker filters.",
                 minimum: 0
@@ -712,7 +712,7 @@ public enum AlmRecorderMCPContract {
                 minimum: 0
             ),
             "ann_candidates_examined": Schema.integer(
-                "Global HNSW candidates examined; zero when ANN was not used.",
+                "Privacy-redacted ANN diagnostic. Currently zero because the shared local index may examine recordings outside the MCP-visible scope.",
                 minimum: 0
             ),
             "index_coverage": Schema.number(
@@ -721,7 +721,7 @@ public enum AlmRecorderMCPContract {
                 maximum: 1
             ),
             "complete": Schema.boolean(
-                "False when a bounded filtered ANN search could not prove exhaustive coverage."
+                "False for privacy-scoped ANN, or when another bounded search could not prove exhaustive coverage."
             )
         ],
         required: [
@@ -734,18 +734,18 @@ public enum AlmRecorderMCPContract {
 
     private static let libraryStatusSchema = Schema.object(
         properties: [
-            "recording_count": Schema.integer("Recording count.", minimum: 0),
-            "tag_count": Schema.integer("Tag count.", minimum: 0),
+            "recording_count": Schema.integer("MCP-visible recording count.", minimum: 0),
+            "tag_count": Schema.integer("Tag count across MCP-visible recordings.", minimum: 0),
             "comment_count": Schema.nullable(
-                Schema.integer("Comment count; null without content access.", minimum: 0)
+                Schema.integer("Comment count on MCP-visible recordings; null without content access.", minimum: 0)
             ),
             "newest_recording_at": Schema.nullable(dateTimeValueSchema),
             "visible_utterance_count": Schema.nullable(
-                Schema.integer("Visible utterance count; null without content access.", minimum: 0)
+                Schema.integer("MCP-visible utterance count; null without content access.", minimum: 0)
             ),
             "indexed_utterance_count": Schema.nullable(
                 Schema.integer(
-                    "Durably indexed visible utterance count; null without content access.",
+                    "Durably indexed MCP-visible utterance count; null without content access.",
                     minimum: 0
                 )
             ),

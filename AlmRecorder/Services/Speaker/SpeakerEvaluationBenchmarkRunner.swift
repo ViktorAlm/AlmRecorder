@@ -15,6 +15,47 @@ struct SpeakerEvaluationBenchmarkBundle: Codable, Equatable {
     let reports: [SpeakerPipelineBenchmarkReport]
     let failures: [SpeakerEvaluationBenchmarkFailure]
     let pairGoldBenchmark: SpeakerPairGoldBenchmarkReport?
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case generatedAt
+        case goldRevision
+        case reports
+        case failures
+        case pairGoldBenchmark
+    }
+
+    init(
+        schemaVersion: Int,
+        generatedAt: Date,
+        goldRevision: String,
+        reports: [SpeakerPipelineBenchmarkReport],
+        failures: [SpeakerEvaluationBenchmarkFailure],
+        pairGoldBenchmark: SpeakerPairGoldBenchmarkReport?
+    ) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.goldRevision = goldRevision
+        self.reports = reports
+        self.failures = failures
+        self.pairGoldBenchmark = pairGoldBenchmark
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+        generatedAt = try values.decode(Date.self, forKey: .generatedAt)
+        goldRevision = try values.decode(String.self, forKey: .goldRevision)
+        reports = try values.decode([SpeakerPipelineBenchmarkReport].self, forKey: .reports)
+        failures = try values.decode(
+            [SpeakerEvaluationBenchmarkFailure].self,
+            forKey: .failures
+        )
+        pairGoldBenchmark = try values.decodeIfPresent(
+            SpeakerPairGoldBenchmarkReport.self,
+            forKey: .pairGoldBenchmark
+        )
+    }
 }
 
 struct SpeakerEvaluationBenchmarkProgress: Equatable, Sendable {
@@ -453,7 +494,24 @@ enum SpeakerEvaluationBenchmarkRunner {
         let selectedAssignments: [String: String]
         let selectedIdentityPredictions: [SpeakerEvaluationSegment]
         let selectedGlobalMethod: String
-        if configuration.identityMatcher == .evidenceGraph {
+        if SpeakerPipelineSettings.shared.continuousReconciliationEnabled,
+           let calibrationBackend,
+           calibrationBackend.model.isLearned {
+            let reconciled = GlobalSpeakerReconciler.reconcile(
+                nodes: globalBenchmarkNodes,
+                model: calibrationBackend.model,
+                cohortEmbeddings: calibrationBackend.cohortEmbeddings,
+                configuration: .init(
+                    mergeProbability: calibrationBackend.mergeProbability
+                )
+            )
+            selectedAssignments = reconciled.assignments
+            selectedIdentityPredictions = remap(
+                localIdentityPredictions,
+                through: reconciled.assignments
+            )
+            selectedGlobalMethod = "production-calibrated-constrained"
+        } else if configuration.identityMatcher == .evidenceGraph {
             let graph = GlobalSpeakerEvidenceGraph.cluster(
                 globalBenchmarkNodes,
                 configuration: .init(
@@ -640,11 +698,20 @@ enum SpeakerEvaluationBenchmarkRunner {
             )
         }
         if let backend = calibrationBackend {
-            let calibratedConfigurations: [(String, String, Double)] = [
+            var calibratedConfigurations: [(String, String, Double)] = [
+                (
+                    "calibrated-production",
+                    "Calibrated reconciler · learned operating point",
+                    backend.mergeProbability
+                ),
                 ("calibrated-078", "Calibrated reconciler · recall", 0.78),
                 ("calibrated-088", "Calibrated reconciler · balanced", 0.88),
                 ("calibrated-094", "Calibrated reconciler · strict", 0.94),
             ]
+            var seenThresholds = Set<Double>()
+            calibratedConfigurations = calibratedConfigurations.filter {
+                seenThresholds.insert(($0.2 * 1_000).rounded() / 1_000).inserted
+            }
             for (id, name, threshold) in calibratedConfigurations {
                 let reconciled = GlobalSpeakerReconciler.reconcile(
                     nodes: nodes,

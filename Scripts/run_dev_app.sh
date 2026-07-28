@@ -18,8 +18,10 @@ cp .build/debug/AlmRecorderMCPBridge "$APP/Contents/MacOS/AlmRecorderMCPBridge"
 chmod +x "$APP/Contents/MacOS/AlmRecorderMCPBridge"
 cp AlmRecorder/Info.plist "$APP/Contents/Info.plist"
 cp AlmRecorder/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"   # Dock/Finder icon (CFBundleIconFile)
-# Note: the app uses SF Symbols / system colors (no Bundle.module), and resolves
-# vectorlite/whisper/llama via absolute dev paths, so no resource bundle is needed here.
+cp AlmRecorder/Assets.xcassets/MenuBarIcon.imageset/menubar.pdf \
+   "$APP/Contents/Resources/MenuBarIcon.pdf"
+# The app otherwise uses SF Symbols / system colors and resolves vectorlite/whisper/llama via
+# absolute dev paths, so no SwiftPM resource bundle is needed here.
 
 # Bundle the one dynamic framework the binary loads via @rpath (GRDB), and point an rpath at it.
 mkdir -p "$APP/Contents/Frameworks"

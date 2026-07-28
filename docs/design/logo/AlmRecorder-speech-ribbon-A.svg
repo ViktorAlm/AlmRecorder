@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">AlmRecorder speech-ribbon A</title>
+  <desc id="description">
+    A custom uppercase A formed by a sage speech ribbon flowing into a charcoal
+    transcript ribbon.
+  </desc>
+
+  <!--
+    Master palette
+    Voice / speech: #859477
+    Transcript / ink: #252824
+    Recommended light background: #F4F0E6
+  -->
+
+  <g shape-rendering="geometricPrecision">
+    <path
+      id="voice-ribbon"
+      fill="#859477"
+      d="
+        M132 752
+        H166
+        C188 752 205 739 216 718
+        L237 676
+        C246 657 265 650 281 662
+        C285 665 289 670 292 675
+        L308 699
+        C319 716 342 712 350 692
+        L488 258
+        C500 220 533 194 573 194
+        H625
+        L579 329
+        C570 327 562 333 558 346
+        L421 774
+        C412 803 385 823 354 823
+        C329 823 307 811 293 791
+        L266 753
+        C260 744 247 745 242 755
+        L228 783
+        C217 807 192 823 166 823
+        H132
+        Z
+      "
+    />
+
+    <path
+      id="folded-crossbar"
+      fill="#252824"
+      fill-rule="evenodd"
+      d="
+        M700 535
+        H505
+        C478 535 460 553 460 579
+        V622
+        C460 648 481 669 507 669
+        H744
+        L723 613
+        H521
+        C510 613 501 604 501 593
+        V587
+        C501 577 510 568 521 568
+        H712
+        Z
+      "
+    />
+
+    <path
+      id="transcript-ribbon"
+      fill="#252824"
+      d="
+        M613 194
+        H645
+        C681 194 708 215 721 249
+        L895 771
+        C903 796 884 823 858 823
+        H780
+        C759 823 740 810 733 790
+        L566 349
+        C559 332 561 313 569 296
+        Z
+      "
+    />
+  </g>
+</svg>

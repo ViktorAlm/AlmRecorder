@@ -467,6 +467,7 @@ struct ModernSettingsView: View {
         case general
         case recording
         case appearance
+        case dictation
         case transcription
         case models
         case speakers
@@ -482,6 +483,7 @@ struct ModernSettingsView: View {
             case .general: return "General"
             case .recording: return "Recording"
             case .appearance: return "Appearance"
+            case .dictation: return "Realtime Dictation"
             case .transcription: return "Transcription"
             case .models: return "Models"
             case .speakers: return "People & Speakers"
@@ -497,6 +499,7 @@ struct ModernSettingsView: View {
             case .speakers: return "Speakers"
             case .speakerID: return "Speaker ID"
             case .mcp: return "MCP"
+            case .dictation: return "Dictation"
             default: return title
             }
         }
@@ -506,6 +509,7 @@ struct ModernSettingsView: View {
             case .general: return "gear"
             case .recording: return "mic"
             case .appearance: return "paintbrush"
+            case .dictation: return "waveform.badge.mic"
             case .transcription: return "text.quote"
             case .models: return "cpu"
             case .speakers: return "person.2"
@@ -521,6 +525,7 @@ struct ModernSettingsView: View {
             case .general: return "App behavior, meeting automation, and library maintenance"
             case .recording: return "Audio quality and recording chunk size"
             case .appearance: return "Theme and accent color"
+            case .dictation: return "Hold-to-talk local dictation and text insertion"
             case .transcription: return "The engine used for new transcription jobs"
             case .models: return "Download and select local AI models"
             case .speakers: return "Review, merge, rename, and repair global identities"
@@ -579,8 +584,16 @@ struct ModernSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 settingsGroup("App", panes: [.general, .recording, .appearance])
-                settingsGroup("AI & Transcription", panes: [.transcription, .models])
-                settingsGroup("Speaker System", panes: [.speakers, .speakerID, .evaluation])
+                settingsGroup(
+                    "AI & Transcription",
+                    panes: [.dictation, .transcription, .models]
+                )
+                settingsGroup(
+                    "Speaker System",
+                    panes: FeatureFlags.developerTools
+                        ? [.speakers, .speakerID, .evaluation]
+                        : [.speakers]
+                )
                 settingsGroup("Library", panes: [.tags])
                 settingsGroup("Integrations", panes: [.mcp])
             }
@@ -633,6 +646,8 @@ struct ModernSettingsView: View {
             RecordingSettingsView()
         case .appearance:
             AppearanceSettingsView()
+        case .dictation:
+            RealtimeDictationSettingsView()
         case .transcription:
             TranscriptionSettingsView(onOpenModels: { selection = .models })
         case .models:
@@ -1196,6 +1211,10 @@ struct MCPSettingsView: View {
     @ObservedObject private var controller = MCPServiceController.shared
     @State private var copied = false
     @State private var confirmRotation = false
+    @State private var availableRecordingCount = 0
+    @State private var hiddenRecordingCount = 0
+
+    private let recordingRepository = GRDBRecordingRepository()
 
     private var enabled: Binding<Bool> {
         Binding(
@@ -1215,6 +1234,15 @@ struct MCPSettingsView: View {
         Binding(
             get: { controller.credential.allowWrites },
             set: { controller.setWriteAccess($0) }
+        )
+    }
+
+    private var clientConfigurationPreview: String {
+        let configuration = controller.clientConfigurationJSON
+        return configuration.replacingOccurrences(
+            of: #"("ALMRECORDER_MCP_TOKEN"\s*:\s*")[^"]*(")"#,
+            with: #"$1<secret token hidden — use Copy configuration>$2"#,
+            options: .regularExpression
         )
     }
 
@@ -1247,9 +1275,31 @@ struct MCPSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Recording privacy") {
+                LabeledContent("Available to MCP") {
+                    Text("\(availableRecordingCount)")
+                        .monospacedDigit()
+                }
+                LabeledContent("Hidden from MCP") {
+                    Text("\(hiddenRecordingCount)")
+                        .monospacedDigit()
+                }
+                Label(
+                    "Individual recordings can be hidden from MCP in their detail view.",
+                    systemImage: "network.slash"
+                )
+                Label(
+                    "Tags can automatically hide every recording carrying that tag.",
+                    systemImage: "tag"
+                )
+                Text("Recording and tag restrictions override every global permission. Hidden recordings are treated as nonexistent across search, resources, meeting notes, comments, writes, and library statistics. MCP clients cannot change privacy-blocking tags.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Client configuration") {
                 ScrollView(.horizontal) {
-                    Text(controller.clientConfigurationJSON)
+                    Text(verbatim: clientConfigurationPreview)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1273,13 +1323,19 @@ struct MCPSettingsView: View {
                     }
                     Spacer()
                 }
-                Text("This configuration contains a secret token. Store it like a password. Rotating the token disconnects existing clients until their configuration is updated.")
+                Text("The secret token is hidden in this preview. Copying includes it, so store the copied configuration like a password. Rotating the token disconnects existing clients until their configuration is updated.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear(perform: refreshPrivacyCounts)
+        .onReceive(
+            NotificationCenter.default.publisher(for: .mcpRecordingPrivacyDidChange)
+        ) { _ in
+            refreshPrivacyCounts()
+        }
         .confirmationDialog(
             "Rotate MCP token?",
             isPresented: $confirmRotation,
@@ -1292,5 +1348,13 @@ struct MCPSettingsView: View {
         } message: {
             Text("Existing MCP client configurations will stop working.")
         }
+    }
+
+    private func refreshPrivacyCounts() {
+        guard let counts = try? recordingRepository.mcpAvailabilityCounts() else {
+            return
+        }
+        availableRecordingCount = counts.available
+        hiddenRecordingCount = counts.hidden
     }
 }

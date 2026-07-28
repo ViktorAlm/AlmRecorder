@@ -1,6 +1,6 @@
 # AlmRecorder MCP Contract Reference
 
-Version: 0.2.0
+Version: 0.3.0
 
 The authoritative machine-readable contract is returned by MCP `tools/list`. AlmRecorder builds
 that catalog and validates both requests and successful structured outputs from the same
@@ -37,15 +37,27 @@ Filter categories combine with AND. Array values for speakers, sources, and meet
 | `auto` | Hybrid only when a model is already loaded and the filtered index is usable; otherwise keyword |
 
 MCP never loads or downloads an embedding model. Search responses include `mode_requested`, `mode`,
-`semantic_strategy` (`not_used`, `exact_filtered`, or `ann`), global and eligible index counts,
-`ann_candidates_examined`, index coverage, and `complete`. A false `complete` means bounded ANN
-could not prove it had found every nearest eligible result.
+`semantic_strategy` (`not_used`, `exact_filtered`, or `ann`), MCP-visible and eligible index counts,
+index coverage, and `complete`. `ann_candidates_examined` remains in the compatibility schema but
+is zero because the raw shared-index count can include locally hidden recordings. ANN responses
+report `complete: false` conservatively rather than exposing shared-index stopping behavior.
+
+## Recording privacy
+
+MCP access is allowed only when the recording's own MCP switch is enabled and none of its tags is
+configured to hide recordings from MCP. Denials always win. Hidden recordings are treated as
+nonexistent across tools, resources, prompts, all search modes, meeting notes, comments, writes,
+counts, timestamps, and index statistics. Retained IDs return `not_found`.
+
+Privacy-blocking tags are local-only controls. They do not appear in `list_tags`, cannot be used as
+MCP filters, and cannot be added to or removed from recordings by an MCP client. A meeting-notes
+object is hidden if any active recording link points to an MCP-hidden recording.
 
 ## Tools
 
 ### `get_library_status`
 
-No arguments. Returns recording/tag/comment counts, global visible/indexed utterance counts,
+No arguments. Returns recording/tag/comment counts and MCP-visible/indexed utterance counts,
 coverage, semantic readiness and an explanatory note. `comment_count` is null without content
 scope; transcript/index counts, coverage, and semantic readiness are also null without content
 scope.
@@ -125,7 +137,7 @@ updates. Repeating the current status returns the existing comment without chang
 - `almrecorder://recordings/{recording_id}/comments`
 
 `resources/list` is cursor-paginated. The server exposes `prepare_meeting_follow_up(recording_id)`
-and `weekly_recap` prompts.
+and `weekly_recap` prompts. Both operate only on MCP-visible recordings.
 
 ## Errors and recovery
 

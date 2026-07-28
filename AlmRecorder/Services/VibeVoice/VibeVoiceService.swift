@@ -66,6 +66,12 @@ final class VibeVoiceService: ObservableObject {
         guard modelManager.isModelDownloaded(quantization) else {
             throw TranscriptionError.modelNotLoaded
         }
+        let resourceProfile = TranscriptionResourceProfile.vibeVoice(quantization)
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: resourceProfile
+        ) {
+            throw TranscriptionError.resourcesUnavailable(deferral.reason)
+        }
         try await validateRuntime()
         let originalSourceURL = URL(fileURLWithPath: audioFile)
         guard FileManager.default.fileExists(atPath: originalSourceURL.path) else {
@@ -129,6 +135,11 @@ final class VibeVoiceService: ObservableObject {
         var offset: TimeInterval = 0
         for (index, window) in windows.enumerated() {
             try Task.checkCancellation()
+            if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+                profile: resourceProfile
+            ) {
+                throw TranscriptionError.resourcesUnavailable(deferral.reason)
+            }
             let windowDuration = try await duration(of: window)
             await update(
                 status: "VibeVoice pass \(index + 1) of \(windows.count)…",
@@ -140,9 +151,8 @@ final class VibeVoiceService: ObservableObject {
                 duration: windowDuration,
                 offset: offset,
                 quantization: quantization,
-                selection: selection,
-                runSettings: runSettings,
-                recoveryDirectory: temporaryDirectory
+                context: selection.vibeVoiceContext,
+                resourceProfile: resourceProfile
             )
             rawChunks.append(contentsOf: parsed.chunks)
             language = parsed.language ?? language
@@ -197,98 +207,51 @@ final class VibeVoiceService: ObservableObject {
         return transcript
     }
 
-    /// Preserve the long-context single pass whenever it fits. If MLX reports a real Metal OOM,
-    /// retry only that window with successively smaller pieces instead of failing the queue job or
-    /// silently changing models. This is especially important on 16–24 GB unified-memory Macs.
+    /// Run one bounded VibeVoice pass. We used to catch an actual OOM here and immediately reload
+    /// the model on smaller pieces. That is unsafe when compressor/swap are already saturated:
+    /// reloading is another multi-GB allocation spike. The queue now cools down and retries only
+    /// after strict admission succeeds.
     private func transcribeWindow(
         _ audioURL: URL,
         duration audioDuration: TimeInterval,
         offset: TimeInterval,
         quantization: VibeVoiceQuantization,
-        selection: TranscriptionEngineSelection,
-        runSettings: RunSettings?,
-        recoveryDirectory: URL
+        context: String?,
+        resourceProfile: TranscriptionResourceProfile
     ) async throws -> VibeVoiceOutput {
-        do {
-            let data = try await runner.run(arguments: helperArguments(
+        let data = try await runner.run(
+            arguments: helperArguments(
                 audioURL: audioURL,
                 modelURL: VibeVoiceConfiguration.modelDirectory(for: quantization),
-                context: selection.vibeVoiceContext,
-                maxTokens: Self.generationTokenBudget(audioDuration: audioDuration)
-            ))
-            return try VibeVoiceOutputParser.parse(
-                data,
-                duration: audioDuration,
-                offset: offset
-            )
-        } catch {
-            guard let transcriptionError = error as? TranscriptionError,
-                  case .gpuOutOfMemory = transcriptionError,
-                  audioDuration > 6 * 60 else {
-                throw error
-            }
-
-            let retryDuration = min(20 * 60, max(5 * 60, audioDuration / 2))
-            await update(
-                status: "Memory limit reached · retrying \(Int(retryDuration / 60))-minute pieces…",
-                progress: max(transcriptionProgress, 0.08),
-                active: true
-            )
-            try FileManager.default.createDirectory(
-                at: recoveryDirectory,
-                withIntermediateDirectories: true
-            )
-            let pieces = try await AudioPreprocessor().splitAudioFile(
-                sourceURL: audioURL,
-                chunkDuration: retryDuration,
-                outputDirectory: recoveryDirectory
-            )
-            var chunks: [TranscriptionChunk] = []
-            var language: String?
-            var peakMemoryGB: Double?
-            var processingSeconds: TimeInterval = 0
-            var pieceOffset = offset
-            for piece in pieces {
-                try Task.checkCancellation()
-                let pieceDuration = try await duration(of: piece)
-                let output = try await transcribeWindow(
-                    piece,
-                    duration: pieceDuration,
-                    offset: pieceOffset,
-                    quantization: quantization,
-                    selection: selection,
-                    runSettings: runSettings,
-                    recoveryDirectory: recoveryDirectory
-                )
-                chunks.append(contentsOf: output.chunks)
-                language = output.language ?? language
-                if let peak = output.peakMemoryGB {
-                    peakMemoryGB = max(peakMemoryGB ?? 0, peak)
-                }
-                processingSeconds += output.processingSeconds ?? 0
-                pieceOffset += pieceDuration
-            }
-            return VibeVoiceOutput(
-                chunks: chunks,
-                language: language,
-                peakMemoryGB: peakMemoryGB,
-                processingSeconds: processingSeconds > 0 ? processingSeconds : nil
-            )
-        }
+                context: context,
+                maxTokens: Self.generationTokenBudget(audioDuration: audioDuration),
+                memoryLimitBytes: resourceProfile.estimatedPeakBytes
+            ),
+            resourceProfile: resourceProfile
+        )
+        let output = try VibeVoiceOutputParser.parse(
+            data,
+            duration: audioDuration,
+            offset: offset
+        )
+        SystemMemoryGate.shared.reportGPUJobSuccess()
+        return output
     }
 
     private func helperArguments(
         audioURL: URL,
         modelURL: URL,
         context: String?,
-        maxTokens: Int
+        maxTokens: Int,
+        memoryLimitBytes: UInt64
     ) -> [String] {
         var arguments = [
             "transcribe",
             "--audio", audioURL.path,
             "--model", modelURL.path,
             "--max-tokens", String(maxTokens),
-            "--temperature", "0.0"
+            "--temperature", "0.0",
+            "--memory-limit-bytes", String(memoryLimitBytes)
         ]
         if let context, !context.isEmpty {
             arguments.append(contentsOf: ["--context", context])

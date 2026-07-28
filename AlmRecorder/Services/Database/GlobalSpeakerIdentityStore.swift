@@ -155,6 +155,56 @@ enum GlobalSpeakerIdentityStore {
             table.primaryKey(["operation_id", "local_cluster_id"])
         }
 
+        // A from-scratch reconciliation may split one legacy identity and merge several others in
+        // the same atomic run. These tables snapshot every assignment and speaker projection so
+        // the whole run can be undone without deleting immutable local-cluster evidence.
+        try db.create(table: "speaker_reconciliation_runs", ifNotExists: true) { table in
+            table.column("id", .text).primaryKey()
+            table.column("status", .text).notNull().defaults(to: "active")
+            table.column("matcher", .text).notNull()
+            table.column("calibration_pair_count", .integer).notNull()
+            table.column("held_out_pair_count", .integer).notNull()
+            table.column("changed_cluster_count", .integer).notNull().defaults(to: 0)
+            table.column("created_identity_count", .integer).notNull().defaults(to: 0)
+            table.column("created_at", .datetime).notNull()
+            table.column("undone_at", .datetime)
+        }
+        try db.create(table: "speaker_reconciliation_members", ifNotExists: true) { table in
+            table.column("run_id", .text).notNull()
+                .references("speaker_reconciliation_runs", onDelete: .cascade)
+            table.column("local_cluster_id", .integer).notNull()
+                .references("speaker_local_clusters", onDelete: .cascade)
+            table.column("previous_speaker_uuid", .text).notNull()
+            table.column("previous_state", .text).notNull()
+            table.column("previous_source", .text).notNull()
+            table.column("previous_confidence", .double).notNull()
+            table.column("previous_score", .double)
+            table.column("previous_margin", .double)
+            table.column("previous_supporting_prototype_count", .integer)
+            table.column("previous_matcher", .text)
+            table.column("previous_evidence_json", .text)
+            table.column("previous_operation_id", .integer)
+            table.column("target_speaker_uuid", .text).notNull()
+            table.primaryKey(["run_id", "local_cluster_id"])
+        }
+        try db.create(table: "speaker_reconciliation_speakers", ifNotExists: true) { table in
+            table.column("run_id", .text).notNull()
+                .references("speaker_reconciliation_runs", onDelete: .cascade)
+            table.column("speaker_uuid", .text).notNull()
+            table.column("previous_identity_state", .text)
+            table.column("previous_canonical_uuid", .text)
+            table.column("was_created", .boolean).notNull().defaults(to: false)
+            table.primaryKey(["run_id", "speaker_uuid"])
+        }
+        let assignmentColumns = Set(
+            try db.columns(in: "speaker_global_assignments").map(\.name)
+        )
+        if !assignmentColumns.contains("reconciliation_run_id") {
+            try db.alter(table: "speaker_global_assignments") {
+                $0.add(column: "reconciliation_run_id", .text)
+            }
+        }
+
         try db.create(table: "speaker_global_candidates", ifNotExists: true) { table in
             table.column("local_cluster_id", .integer).notNull()
                 .references("speaker_local_clusters", onDelete: .cascade)
@@ -489,6 +539,15 @@ enum GlobalSpeakerIdentityStore {
             ]
         )
         let operationId = db.lastInsertedRowID
+        if linkSource == .manual,
+           try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.recordManualGlobalMerge(
+                db,
+                sourceUUID: source,
+                targetUUID: target,
+                operationID: operationId
+            )
+        }
         let assignmentState: GlobalSpeakerAssignmentState =
             linkSource == .manual ? .manual : .automatic
         let assignmentSource: SpeakerAssignmentSource =
@@ -516,6 +575,7 @@ enum GlobalSpeakerIdentityStore {
                         speaker_uuid = ?, state = ?, source = ?,
                         score = ?, margin = ?, supporting_prototype_count = ?,
                         matcher = ?, evidence_json = ?, operation_id = ?, updated_at = ?
+                        , reconciliation_run_id = NULL
                     WHERE local_cluster_id = ?
                 """,
                 arguments: [
@@ -638,6 +698,12 @@ enum GlobalSpeakerIdentityStore {
             """,
             arguments: [Date(), operationId]
         )
+        if try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.deleteDerivedLabels(
+                db,
+                actionID: "global-merge:\(operationId)"
+            )
+        }
         try refreshProfile(db, uuid: sourceUUID)
         try refreshProfile(db, uuid: targetUUID)
         return true
@@ -668,7 +734,8 @@ enum GlobalSpeakerIdentityStore {
         state: GlobalSpeakerAssignmentState = .manual,
         source: SpeakerAssignmentSource = .globalManual,
         matcher: String = "user-local-cluster",
-        refreshProfiles: Bool = true
+        refreshProfiles: Bool = true,
+        goldActionID: String? = nil
     ) throws {
         let target = try canonicalUUID(db, uuid: targetUUID)
         guard try speakerExists(db, uuid: target) else { return }
@@ -716,6 +783,21 @@ enum GlobalSpeakerIdentityStore {
                 arguments: [target, source.rawValue, Date(), clusterId]
             )
         }
+        if (state == .manual || state == .gold),
+           source == .globalManual,
+           oldUUID != target,
+           try db.tableExists("speaker_pair_gold_labels") {
+            let labelSource: SpeakerPairGoldSource =
+                matcher == "user-profile-split" ? .profileSplit : .manualAssignment
+            try SpeakerPairGoldStore.recordManualAssignment(
+                db,
+                clusterID: clusterId,
+                previousUUID: oldUUID,
+                targetUUID: target,
+                source: labelSource,
+                actionID: goldActionID ?? "local-assignment:\(UUID().uuidString)"
+            )
+        }
         if refreshProfiles {
             try refreshProfile(db, uuid: target)
             if let oldUUID, oldUUID != target {
@@ -732,6 +814,7 @@ enum GlobalSpeakerIdentityStore {
         to targetUUID: String,
         displayLabel: String?
     ) throws {
+        let target = try canonicalUUID(db, uuid: targetUUID)
         guard var row = try Row.fetchOne(
             db,
             sql: """
@@ -786,19 +869,30 @@ enum GlobalSpeakerIdentityStore {
                 WHERE id = ?
             """,
             arguments: [
-                childClusterId, targetUUID, displayLabel,
+                childClusterId, target, displayLabel,
                 SpeakerAssignmentSource.globalManual.rawValue, Date(), utteranceId
             ]
         )
         try assignLocalCluster(
             db,
             clusterId: childClusterId,
-            to: targetUUID,
+            to: target,
             displayLabel: displayLabel,
             state: .manual,
             source: .globalManual,
             matcher: "user-single-utterance-split"
         )
+        if oldUUID != target,
+           try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.recordManualAssignment(
+                db,
+                clusterID: childClusterId,
+                previousUUID: oldUUID,
+                targetUUID: target,
+                source: .manualAssignment,
+                actionID: "utterance-assignment:\(utteranceId)"
+            )
+        }
         if let oldClusterId, oldClusterId != childClusterId {
             try refreshLocalClusterEvidence(db, clusterId: oldClusterId)
         }
@@ -1089,6 +1183,7 @@ enum GlobalSpeakerIdentityStore {
                     matcher = excluded.matcher,
                     evidence_json = excluded.evidence_json,
                     operation_id = NULL,
+                    reconciliation_run_id = NULL,
                     updated_at = excluded.updated_at
             """,
             arguments: [

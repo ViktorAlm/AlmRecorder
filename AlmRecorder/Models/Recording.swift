@@ -26,6 +26,10 @@ struct Recording: Codable, Identifiable {
     // MCP clients never need to retain the database's internal integer primary key.
     var externalId: String? = nil
     var updatedAt: Date? = nil
+
+    // Local-only MCP privacy control (migration v41). Blocking tags can still
+    // make the effective access false when this explicit switch is true.
+    var mcpAccessEnabled: Bool = true
     
     enum RecordingSource: String, Codable, CaseIterable {
         case recording = "recording"

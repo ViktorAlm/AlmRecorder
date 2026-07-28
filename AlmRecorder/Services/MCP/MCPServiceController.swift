@@ -74,7 +74,8 @@ final class MCPAuthorizationStore: @unchecked Sendable {
             transcripts: value.allowTranscripts,
             writes: value.allowWrites,
             clientId: value.clientId,
-            authorizationRevision: value.authorizationRevision ?? ""
+            authorizationRevision: value.authorizationRevision ?? "",
+            privacyRevision: MCPPrivacyRevisionStore.shared.snapshot()
         )
     }
 
@@ -85,7 +86,8 @@ final class MCPAuthorizationStore: @unchecked Sendable {
     ) -> Bool {
         let value = current()
         guard value.clientId == access.clientId,
-              value.authorizationRevision == access.authorizationRevision else {
+              value.authorizationRevision == access.authorizationRevision,
+              MCPPrivacyRevisionStore.shared.snapshot() == access.privacyRevision else {
             return false
         }
         if content && !value.allowTranscripts { return false }
@@ -139,9 +141,17 @@ final class MCPServiceController: ObservableObject {
     @Published private(set) var credential: MCPClientCredential
 
     private var server: MCPUnixSocketServer?
+    private var privacyObserver: AnyCancellable?
 
     private init() {
         credential = MCPAuthorizationStore.shared.current()
+        privacyObserver = NotificationCenter.default.publisher(
+            for: .mcpRecordingPrivacyDidChange
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.server?.cancelActiveRequests()
+        }
     }
 
     var isEnabled: Bool {

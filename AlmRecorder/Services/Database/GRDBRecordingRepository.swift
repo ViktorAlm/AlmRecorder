@@ -21,8 +21,8 @@ class GRDBRecordingRepository {
                     INSERT INTO recordings (
                         title, file_name, file_path, duration, language,
                         created_at, transcribed_at, source, full_transcript, metadata,
-                        external_id, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        external_id, updated_at, mcp_access_enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 arguments: [
                     recording.title,
@@ -36,7 +36,8 @@ class GRDBRecordingRepository {
                     recording.fullTranscript,
                     metadataJSON,
                     recording.externalId ?? "rec_\(UUID().uuidString.lowercased())",
-                    recording.updatedAt ?? recording.createdAt
+                    recording.updatedAt ?? recording.createdAt,
+                    recording.mcpAccessEnabled
                 ]
             )
             
@@ -77,6 +78,67 @@ class GRDBRecordingRepository {
                 sql: "UPDATE recordings SET file_path = ? WHERE id = ?",
                 arguments: [newPath, id]
             )
+        }
+    }
+
+    func mcpPrivacyStatus(id: Int64) throws -> MCPRecordingPrivacyStatus? {
+        try db.read { db in
+            guard let enabled = try Bool.fetchOne(
+                db,
+                sql: "SELECT mcp_access_enabled FROM recordings WHERE id = ?",
+                arguments: [id]
+            ) else {
+                return nil
+            }
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT t.*
+                    FROM tags t
+                    JOIN recording_tags rt ON rt.tag_id = t.id
+                    WHERE rt.recording_id = ?
+                      AND t.mcp_hidden = 1
+                    ORDER BY LOWER(t.name)
+                """,
+                arguments: [id]
+            )
+            return MCPRecordingPrivacyStatus(
+                recordingAllowsAccess: enabled,
+                blockingTags: rows.compactMap(Tag.init(row:))
+            )
+        }
+    }
+
+    func mcpAvailabilityCounts() throws -> (available: Int, hidden: Int) {
+        try db.read { db in
+            let total = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM recordings"
+            ) ?? 0
+            let available = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)
+                """
+            ) ?? 0
+            return (available: available, hidden: max(0, total - available))
+        }
+    }
+
+    func setMCPAccessEnabled(id: Int64, enabled: Bool) throws {
+        try db.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE recordings
+                    SET mcp_access_enabled = ?, updated_at = ?
+                    WHERE id = ? AND mcp_access_enabled <> ?
+                """,
+                arguments: [enabled, Date(), id, enabled]
+            )
+            if db.changesCount > 0 {
+                MCPPrivacyRevisionStore.shared.invalidate()
+            }
         }
     }
 
@@ -609,6 +671,7 @@ extension Recording {
             .flatMap { try? JSONDecoder().decode(SpeakerPipelineConfiguration.self, from: $0) }
         self.externalId = row["external_id"]
         self.updatedAt = row["updated_at"]
+        self.mcpAccessEnabled = row["mcp_access_enabled"] ?? true
 
         // Parse metadata JSON if present
         let metadataJSON: String? = row["metadata"]

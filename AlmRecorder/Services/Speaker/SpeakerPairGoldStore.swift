@@ -12,6 +12,29 @@ enum SpeakerPairGoldVerdict: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Keeps calibration data separate from the safety set used to decide whether an automatic
+/// reconciler is allowed to touch People. The partition is recording-based: every pair involving
+/// a held-out recording stays held out, so the same recording never leaks into model fitting.
+enum SpeakerPairGoldRole: String, Codable, Sendable {
+    case development
+    case heldOut = "held_out"
+
+    var displayName: String {
+        switch self {
+        case .development: return "Calibration"
+        case .heldOut: return "Held-out safety"
+        }
+    }
+}
+
+enum SpeakerPairGoldSource: String, Codable, Sendable {
+    case pairReview = "pair_review"
+    case manualGlobalMerge = "manual_global_merge"
+    case manualAssignment = "manual_assignment"
+    case profileSplit = "profile_split"
+    case conversationGold = "conversation_gold"
+}
+
 enum SpeakerLocalClusterGoldVerdict: String, Codable, Sendable {
     case multipleSpeakers = "multiple_speakers"
 }
@@ -38,6 +61,7 @@ struct SpeakerPairReviewCandidate: Identifiable, Equatable, Sendable {
     let similarity: Float
     let score: Double
     let reason: String
+    let goldRole: SpeakerPairGoldRole
 
     var id: String { Self.key(left.id, right.id) }
 
@@ -80,6 +104,8 @@ struct SpeakerPairGoldBenchmarkReport: Codable, Equatable, Sendable {
 
 struct SpeakerPairReviewWorkspace: Equatable, Sendable {
     let counts: SpeakerPairGoldCounts
+    let developmentCounts: SpeakerPairGoldCounts
+    let heldOutCounts: SpeakerPairGoldCounts
     let multipleSpeakerClipCount: Int
     let candidates: [SpeakerPairReviewCandidate]
     let benchmark: SpeakerPairGoldBenchmarkReport?
@@ -91,7 +117,28 @@ struct SpeakerPairGoldLabel: Equatable, Sendable {
     let leftClusterId: Int64
     let rightClusterId: Int64
     let verdict: SpeakerPairGoldVerdict
+    let role: SpeakerPairGoldRole
+    let source: SpeakerPairGoldSource
+    let sourceActionID: String?
     let updatedAt: Date
+
+    init(
+        leftClusterId: Int64,
+        rightClusterId: Int64,
+        verdict: SpeakerPairGoldVerdict,
+        role: SpeakerPairGoldRole = .development,
+        source: SpeakerPairGoldSource = .pairReview,
+        sourceActionID: String? = nil,
+        updatedAt: Date
+    ) {
+        self.leftClusterId = leftClusterId
+        self.rightClusterId = rightClusterId
+        self.verdict = verdict
+        self.role = role
+        self.source = source
+        self.sourceActionID = sourceActionID
+        self.updatedAt = updatedAt
+    }
 
     var key: String {
         SpeakerPairReviewCandidate.key(leftClusterId, rightClusterId)
@@ -127,6 +174,55 @@ enum SpeakerPairGoldStore {
             index: "idx_speaker_pair_gold_verdict",
             on: "speaker_pair_gold_labels",
             columns: ["verdict", "updated_at"],
+            ifNotExists: true
+        )
+        let pairColumns = Set(try db.columns(in: "speaker_pair_gold_labels").map(\.name))
+        if !pairColumns.contains("dataset_role") {
+            try db.alter(table: "speaker_pair_gold_labels") {
+                $0.add(column: "dataset_role", .text)
+                    .notNull()
+                    .defaults(to: SpeakerPairGoldRole.development.rawValue)
+            }
+            // Backfill the pre-partition labels deterministically by recording. Any pair touching
+            // a held-out recording is held out, preventing endpoint/session leakage.
+            let localClusterColumns = Set(
+                try db.columns(in: "speaker_local_clusters").map(\.name)
+            )
+            if localClusterColumns.contains("recording_id") {
+                try db.execute(
+                    sql: """
+                        UPDATE speaker_pair_gold_labels
+                        SET dataset_role = ?
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM speaker_local_clusters c
+                            WHERE c.id IN (
+                                speaker_pair_gold_labels.left_local_cluster_id,
+                                speaker_pair_gold_labels.right_local_cluster_id
+                            )
+                              AND ABS(c.recording_id) % 5 = 0
+                        )
+                    """,
+                    arguments: [SpeakerPairGoldRole.heldOut.rawValue]
+                )
+            }
+        }
+        if !pairColumns.contains("label_source") {
+            try db.alter(table: "speaker_pair_gold_labels") {
+                $0.add(column: "label_source", .text)
+                    .notNull()
+                    .defaults(to: SpeakerPairGoldSource.pairReview.rawValue)
+            }
+        }
+        if !pairColumns.contains("source_action_id") {
+            try db.alter(table: "speaker_pair_gold_labels") {
+                $0.add(column: "source_action_id", .text)
+            }
+        }
+        try db.create(
+            index: "idx_speaker_pair_gold_source_action",
+            on: "speaker_pair_gold_labels",
+            columns: ["label_source", "source_action_id"],
             ifNotExists: true
         )
         try db.create(table: "speaker_local_cluster_gold_labels", ifNotExists: true) { table in
@@ -179,6 +275,8 @@ enum SpeakerPairGoldStore {
         guard try db.tableExists("speaker_pair_gold_labels") else {
             return SpeakerPairReviewWorkspace(
                 counts: SpeakerPairGoldCounts(),
+                developmentCounts: SpeakerPairGoldCounts(),
+                heldOutCounts: SpeakerPairGoldCounts(),
                 multipleSpeakerClipCount: 0,
                 candidates: [],
                 benchmark: nil,
@@ -201,15 +299,20 @@ enum SpeakerPairGoldStore {
             !multipleSpeakerClusterIDs.contains($0.leftClusterId)
                 && !multipleSpeakerClusterIDs.contains($0.rightClusterId)
         }
-        let counts = counts(identityLabels)
+        let totalCounts = counts(identityLabels)
+        let developmentCounts = counts(identityLabels.filter { $0.role == .development })
+        let heldOutCounts = counts(identityLabels.filter { $0.role == .heldOut })
         let benchmark = benchmark(samples: identitySamples, labels: identityLabels)
         return SpeakerPairReviewWorkspace(
-            counts: counts,
+            counts: totalCounts,
+            developmentCounts: developmentCounts,
+            heldOutCounts: heldOutCounts,
             multipleSpeakerClipCount: multipleSpeakerClusterIDs.count,
             candidates: rank(
                 samples: identitySamples,
                 reviewedPairKeys: Set(labels.map(\.key)),
-                limit: limit
+                limit: limit,
+                heldOutCounts: heldOutCounts
             ),
             benchmark: benchmark,
             reconciliationShadow: try GlobalSpeakerLibraryReconciliation.shadowReport(db),
@@ -220,14 +323,20 @@ enum SpeakerPairGoldStore {
     static func save(
         leftClusterId: Int64,
         rightClusterId: Int64,
-        verdict: SpeakerPairGoldVerdict
+        verdict: SpeakerPairGoldVerdict,
+        role: SpeakerPairGoldRole? = nil,
+        source: SpeakerPairGoldSource = .pairReview,
+        sourceActionID: String? = nil
     ) throws {
         try GRDBDatabaseManager.shared.write { db in
             try save(
                 db,
-                leftClusterId: leftClusterId,
-                rightClusterId: rightClusterId,
-                verdict: verdict
+                    leftClusterId: leftClusterId,
+                    rightClusterId: rightClusterId,
+                    verdict: verdict,
+                    role: role,
+                    source: source,
+                    sourceActionID: sourceActionID
             )
         }
     }
@@ -237,23 +346,211 @@ enum SpeakerPairGoldStore {
         leftClusterId: Int64,
         rightClusterId: Int64,
         verdict: SpeakerPairGoldVerdict,
+        role: SpeakerPairGoldRole? = nil,
+        source: SpeakerPairGoldSource = .pairReview,
+        sourceActionID: String? = nil,
         now: Date = Date()
     ) throws {
         let left = min(leftClusterId, rightClusterId)
         let right = max(leftClusterId, rightClusterId)
         guard left != right else { return }
+        let resolvedRole = try role ?? roleForPair(
+            db,
+            leftClusterId: left,
+            rightClusterId: right
+        )
         try db.execute(
             sql: """
                 INSERT INTO speaker_pair_gold_labels (
                     left_local_cluster_id, right_local_cluster_id,
-                    verdict, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    verdict, dataset_role, label_source, source_action_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(left_local_cluster_id, right_local_cluster_id) DO UPDATE SET
                     verdict = excluded.verdict,
+                    dataset_role = excluded.dataset_role,
+                    label_source = excluded.label_source,
+                    source_action_id = excluded.source_action_id,
                     updated_at = excluded.updated_at
             """,
-            arguments: [left, right, verdict.rawValue, now, now]
+            arguments: [
+                left,
+                right,
+                verdict.rawValue,
+                resolvedRole.rawValue,
+                source.rawValue,
+                sourceActionID,
+                now,
+                now,
+            ]
         )
+    }
+
+    /// Convert an explicit global People merge into development gold. Existing pair-review labels
+    /// always win; one user action contributes a bounded, recording-diverse set instead of an
+    /// unbounded Cartesian product.
+    static func recordManualGlobalMerge(
+        _ db: Database,
+        sourceUUID: String,
+        targetUUID: String,
+        operationID: Int64,
+        now: Date = Date()
+    ) throws {
+        let sourceClusters = try reliableClusters(db, speakerUUID: sourceUUID)
+        let targetClusters = try reliableClusters(db, speakerUUID: targetUUID)
+        let actionID = "global-merge:\(operationID)"
+        var inserted = 0
+        for source in sourceClusters {
+            for target in targetClusters
+            where source.recordingID != target.recordingID {
+                guard inserted < 12 else { return }
+                if try insertDerivedLabel(
+                    db,
+                    leftClusterID: source.id,
+                    rightClusterID: target.id,
+                    verdict: .samePerson,
+                    source: .manualGlobalMerge,
+                    actionID: actionID,
+                    now: now
+                ) {
+                    inserted += 1
+                }
+            }
+        }
+    }
+
+    /// Convert “this local voice belongs to that person” into positive evidence against clean
+    /// target examples and negative evidence against the clean profile it was removed from.
+    static func recordManualAssignment(
+        _ db: Database,
+        clusterID: Int64,
+        previousUUID: String?,
+        targetUUID: String,
+        source: SpeakerPairGoldSource = .manualAssignment,
+        actionID: String,
+        now: Date = Date()
+    ) throws {
+        guard let moved = try reliableCluster(db, id: clusterID) else { return }
+        // A later correction supersedes derived evidence for this endpoint. Direct pair-review
+        // labels are never deleted or overwritten.
+        try db.execute(
+            sql: """
+                DELETE FROM speaker_pair_gold_labels
+                WHERE label_source IN (?, ?)
+                  AND (left_local_cluster_id = ? OR right_local_cluster_id = ?)
+            """,
+            arguments: [
+                SpeakerPairGoldSource.manualAssignment.rawValue,
+                SpeakerPairGoldSource.profileSplit.rawValue,
+                clusterID,
+                clusterID,
+            ]
+        )
+
+        let targetExamples = try reliableClusters(db, speakerUUID: targetUUID)
+            .filter { $0.id != clusterID && $0.recordingID != moved.recordingID }
+        for target in targetExamples.prefix(3) {
+            _ = try insertDerivedLabel(
+                db,
+                leftClusterID: clusterID,
+                rightClusterID: target.id,
+                verdict: .samePerson,
+                source: source,
+                actionID: actionID,
+                now: now
+            )
+        }
+        if let previousUUID, previousUUID != targetUUID {
+            let previousExamples = try reliableClusters(db, speakerUUID: previousUUID)
+                .filter { $0.id != clusterID && $0.recordingID != moved.recordingID }
+            for previous in previousExamples.prefix(3) {
+                _ = try insertDerivedLabel(
+                    db,
+                    leftClusterID: clusterID,
+                    rightClusterID: previous.id,
+                    verdict: .differentPeople,
+                    source: source,
+                    actionID: actionID,
+                    now: now
+                )
+            }
+        }
+    }
+
+    static func deleteDerivedLabels(
+        _ db: Database,
+        actionID: String
+    ) throws {
+        try db.execute(
+            sql: """
+                DELETE FROM speaker_pair_gold_labels
+                WHERE source_action_id = ? AND label_source <> ?
+            """,
+            arguments: [actionID, SpeakerPairGoldSource.pairReview.rawValue]
+        )
+    }
+
+    /// A fully reviewed conversation yields definite within-call Same/Different relations. These
+    /// inherit the recording-based partition, so a held-out recording contributes only safety
+    /// examples and never leaks into calibration.
+    static func recordConversationGold(
+        _ db: Database,
+        recordingID: Int64,
+        now: Date = Date()
+    ) throws {
+        let actionID = "conversation-gold:\(recordingID)"
+        try deleteDerivedLabels(db, actionID: actionID)
+        let clusters = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT c.id, c.recording_id, a.speaker_uuid
+                FROM speaker_local_clusters c
+                JOIN speaker_global_assignments a ON a.local_cluster_id = c.id
+                LEFT JOIN speaker_local_cluster_gold_labels mixed
+                  ON mixed.local_cluster_id = c.id
+                 AND mixed.verdict = 'multiple_speakers'
+                WHERE c.recording_id = ?
+                  AND c.embedding IS NOT NULL
+                  AND c.mixture_split_gain IS NULL
+                  AND NOT (
+                      c.embedding_turn_count > 1
+                      AND COALESCE(c.cohesion, 1) < 0.35
+                  )
+                  AND mixed.local_cluster_id IS NULL
+                ORDER BY c.id
+            """,
+            arguments: [recordingID]
+        ).compactMap { row -> (id: Int64, uuid: String)? in
+            guard let id: Int64 = row["id"],
+                  let uuid: String = row["speaker_uuid"] else { return nil }
+            return (id, uuid)
+        }
+        let role = try roleForPair(
+            db,
+            leftClusterId: clusters.first?.id ?? 0,
+            rightClusterId: clusters.last?.id ?? 0
+        )
+        var inserted = 0
+        for leftIndex in clusters.indices {
+            guard leftIndex + 1 < clusters.count else { continue }
+            for rightIndex in (leftIndex + 1)..<clusters.count {
+                guard inserted < 24 else { return }
+                if try insertDerivedLabel(
+                    db,
+                    leftClusterID: clusters[leftIndex].id,
+                    rightClusterID: clusters[rightIndex].id,
+                    verdict: clusters[leftIndex].uuid == clusters[rightIndex].uuid
+                        ? .samePerson
+                        : .differentPeople,
+                    role: role,
+                    source: .conversationGold,
+                    actionID: actionID,
+                    now: now
+                ) {
+                    inserted += 1
+                }
+            }
+        }
     }
 
     static func delete(leftClusterId: Int64, rightClusterId: Int64) throws {
@@ -520,11 +817,101 @@ enum SpeakerPairGoldStore {
         return safeStart..<max(safeStart + 0.2, end)
     }
 
+    private struct ReliableCluster {
+        let id: Int64
+        let recordingID: Int64
+    }
+
+    private static func reliableCluster(
+        _ db: Database,
+        id: Int64
+    ) throws -> ReliableCluster? {
+        try reliableClusters(db, clusterID: id).first
+    }
+
+    private static func reliableClusters(
+        _ db: Database,
+        speakerUUID: String? = nil,
+        clusterID: Int64? = nil
+    ) throws -> [ReliableCluster] {
+        var predicates = [
+            "c.embedding IS NOT NULL",
+            "c.mixture_split_gain IS NULL",
+            "NOT (c.embedding_turn_count > 1 AND COALESCE(c.cohesion, 1) < 0.35)",
+            "mixed.local_cluster_id IS NULL",
+        ]
+        var arguments: StatementArguments = []
+        if let speakerUUID {
+            predicates.append("a.speaker_uuid = ?")
+            arguments += [speakerUUID]
+        }
+        if let clusterID {
+            predicates.append("c.id = ?")
+            arguments += [clusterID]
+        }
+        return try Row.fetchAll(
+            db,
+            sql: """
+                SELECT c.id, c.recording_id
+                FROM speaker_local_clusters c
+                JOIN speaker_global_assignments a ON a.local_cluster_id = c.id
+                LEFT JOIN speaker_local_cluster_gold_labels mixed
+                  ON mixed.local_cluster_id = c.id
+                 AND mixed.verdict = 'multiple_speakers'
+                WHERE \(predicates.joined(separator: " AND "))
+                ORDER BY c.recording_id, c.id
+            """,
+            arguments: arguments
+        ).compactMap { row in
+            guard let id: Int64 = row["id"],
+                  let recordingID: Int64 = row["recording_id"] else { return nil }
+            return ReliableCluster(id: id, recordingID: recordingID)
+        }
+    }
+
+    @discardableResult
+    private static func insertDerivedLabel(
+        _ db: Database,
+        leftClusterID: Int64,
+        rightClusterID: Int64,
+        verdict: SpeakerPairGoldVerdict,
+        role: SpeakerPairGoldRole = .development,
+        source: SpeakerPairGoldSource,
+        actionID: String,
+        now: Date
+    ) throws -> Bool {
+        let left = min(leftClusterID, rightClusterID)
+        let right = max(leftClusterID, rightClusterID)
+        guard left != right else { return false }
+        try db.execute(
+            sql: """
+                INSERT INTO speaker_pair_gold_labels (
+                    left_local_cluster_id, right_local_cluster_id,
+                    verdict, dataset_role, label_source, source_action_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(left_local_cluster_id, right_local_cluster_id) DO NOTHING
+            """,
+            arguments: [
+                left,
+                right,
+                verdict.rawValue,
+                role.rawValue,
+                source.rawValue,
+                actionID,
+                now,
+                now,
+            ]
+        )
+        return db.changesCount > 0
+    }
+
     private static func loadLabels(_ db: Database) throws -> [SpeakerPairGoldLabel] {
         try Row.fetchAll(
             db,
             sql: """
-                SELECT left_local_cluster_id, right_local_cluster_id, verdict, updated_at
+                SELECT left_local_cluster_id, right_local_cluster_id, verdict,
+                       dataset_role, label_source, source_action_id, updated_at
                 FROM speaker_pair_gold_labels
                 ORDER BY updated_at, left_local_cluster_id, right_local_cluster_id
             """
@@ -538,6 +925,13 @@ enum SpeakerPairGoldStore {
                 leftClusterId: left,
                 rightClusterId: right,
                 verdict: verdict,
+                role: SpeakerPairGoldRole(
+                    rawValue: row["dataset_role"] ?? ""
+                ) ?? .development,
+                source: SpeakerPairGoldSource(
+                    rawValue: row["label_source"] ?? ""
+                ) ?? .pairReview,
+                sourceActionID: row["source_action_id"],
                 updatedAt: row["updated_at"] ?? .distantPast
             )
         }
@@ -582,7 +976,8 @@ enum SpeakerPairGoldStore {
     static func rank(
         samples: [SpeakerPairVoiceSample],
         reviewedPairKeys: Set<String>,
-        limit: Int
+        limit: Int,
+        heldOutCounts: SpeakerPairGoldCounts? = nil
     ) -> [SpeakerPairReviewCandidate] {
         guard limit > 0 else { return [] }
         // A Same/Different question is undefined when either side contains several people.
@@ -683,7 +1078,9 @@ enum SpeakerPairGoldStore {
         var seen: Set<String> = []
         var usage: [Int64: Int] = [:]
         var result: [SpeakerPairReviewCandidate] = []
-        for candidate in proposed.sorted(by: candidateOrder) {
+        for candidate in proposed.sorted(by: {
+            candidateOrder($0, $1, heldOutCounts: heldOutCounts)
+        }) {
             guard !seen.contains(candidate.id),
                   usage[candidate.left.id, default: 0] < 3,
                   usage[candidate.right.id, default: 0] < 3
@@ -715,17 +1112,39 @@ enum SpeakerPairGoldStore {
                 right: ordered.1,
                 similarity: similarity,
                 score: score,
-                reason: reason
+                reason: reason,
+                goldRole: roleForPair(left.recordingId, right.recordingId)
             )
         )
     }
 
     private static func candidateOrder(
         _ lhs: SpeakerPairReviewCandidate,
-        _ rhs: SpeakerPairReviewCandidate
+        _ rhs: SpeakerPairReviewCandidate,
+        heldOutCounts: SpeakerPairGoldCounts?
     ) -> Bool {
+        let leftPriority = heldOutPriority(lhs, counts: heldOutCounts)
+        let rightPriority = heldOutPriority(rhs, counts: heldOutCounts)
+        if leftPriority != rightPriority { return leftPriority > rightPriority }
         if lhs.score != rhs.score { return lhs.score > rhs.score }
         return lhs.id < rhs.id
+    }
+
+    /// Fill the independent safety set before asking lower-value calibration questions. Current
+    /// assignments are only a queue heuristic: the developer still supplies the actual verdict.
+    private static func heldOutPriority(
+        _ candidate: SpeakerPairReviewCandidate,
+        counts: SpeakerPairGoldCounts?
+    ) -> Int {
+        guard let counts, candidate.goldRole == .heldOut else { return 0 }
+        let needsSame = counts.samePerson < 3
+        let needsDifferent = counts.differentPeople < 3
+        let predictedSame = candidate.left.currentSpeakerUUID != nil
+            && candidate.left.currentSpeakerUUID == candidate.right.currentSpeakerUUID
+        if needsDifferent && !predictedSame { return 3 }
+        if needsSame && predictedSame { return 3 }
+        if needsSame || needsDifferent { return 2 }
+        return 0
     }
 
     private static func counts(_ labels: [SpeakerPairGoldLabel]) -> SpeakerPairGoldCounts {
@@ -757,6 +1176,7 @@ enum SpeakerPairGoldStore {
             "\(totals.mixedOrUnclear)",
             "\(totals.unsure)",
             "\(clusterLabels.count)",
+            "\(labels.filter { $0.role == .heldOut }.count)",
         ].joined(separator: ":")
     }
 
@@ -789,14 +1209,15 @@ enum SpeakerPairGoldStore {
             id: String,
             name: String,
             threshold: Float?,
-            assignments: [String: String]
+            assignments: [String: String],
+            labels evaluationLabels: [SpeakerPairGoldLabel]? = nil
         ) -> SpeakerPairGoldCandidateReport {
             SpeakerPairGoldCandidateReport(
                 id: id,
                 name: name,
                 threshold: threshold,
                 metrics: evaluate(
-                    labels: scored,
+                    labels: evaluationLabels ?? scored,
                     assignments: assignments
                 )
             )
@@ -839,7 +1260,9 @@ enum SpeakerPairGoldStore {
                 )
             )
         }
-        let calibrationExamples = scored.map {
+        let development = scored.filter { $0.role == .development }
+        let heldOut = scored.filter { $0.role == .heldOut }
+        let calibrationExamples = development.map {
             GlobalSpeakerCalibrationExample(
                 leftNodeID: "cluster:\($0.leftClusterId)",
                 rightNodeID: "cluster:\($0.rightClusterId)",
@@ -850,7 +1273,7 @@ enum SpeakerPairGoldStore {
             nodes: nodes,
             examples: calibrationExamples
         )
-        let constraints = scored.map {
+        let constraints = development.map {
             GlobalSpeakerReconciliationConstraint(
                 "cluster:\($0.leftClusterId)",
                 "cluster:\($0.rightClusterId)",
@@ -869,9 +1292,23 @@ enum SpeakerPairGoldStore {
                     ? "Calibrated + constraints · development"
                     : "Constraints + fallback score · development",
                 threshold: 0.88,
-                assignments: reconciled.assignments
+                assignments: reconciled.assignments,
+                labels: development
             )
         )
+        if !heldOut.isEmpty {
+            candidates.append(
+                report(
+                    id: "calibrated-constrained-held-out",
+                    name: calibratedModel.isLearned
+                        ? "Calibrated + constraints · held-out"
+                        : "Fallback score · held-out",
+                    threshold: 0.88,
+                    assignments: reconciled.assignments,
+                    labels: heldOut
+                )
+            )
+        }
         return SpeakerPairGoldBenchmarkReport(
             revision: revision(labels, clusterLabels: []),
             candidates: candidates
@@ -914,6 +1351,38 @@ enum SpeakerPairGoldStore {
             falseMergePairs: falseMerge,
             falseSplitPairs: falseSplit
         )
+    }
+
+    static func roleForPair(
+        _ leftRecordingId: Int64,
+        _ rightRecordingId: Int64
+    ) -> SpeakerPairGoldRole {
+        isHeldOutRecording(leftRecordingId) || isHeldOutRecording(rightRecordingId)
+            ? .heldOut
+            : .development
+    }
+
+    private static func roleForPair(
+        _ db: Database,
+        leftClusterId: Int64,
+        rightClusterId: Int64
+    ) throws -> SpeakerPairGoldRole {
+        let columns = Set(try db.columns(in: "speaker_local_clusters").map(\.name))
+        guard columns.contains("recording_id") else { return .development }
+        let recordingIDs = try Int64.fetchAll(
+            db,
+            sql: """
+                SELECT recording_id
+                FROM speaker_local_clusters
+                WHERE id IN (?, ?)
+            """,
+            arguments: [leftClusterId, rightClusterId]
+        )
+        return recordingIDs.contains(where: isHeldOutRecording) ? .heldOut : .development
+    }
+
+    private static func isHeldOutRecording(_ recordingId: Int64) -> Bool {
+        abs(recordingId) % 5 == 0
     }
 
     private struct CodableTimeSpan: Codable {

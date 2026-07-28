@@ -287,6 +287,27 @@ struct TranscriptionJob: Identifiable, Equatable {
     var canRetry: Bool {
         status == .failed && retryCount < maxRetries
     }
+
+    /// A pending job may be deliberately deferred rather than merely waiting its turn. Keep the
+    /// reason on the job so every queue surface can explain the state consistently.
+    var pendingReason: String? {
+        guard status == .pending else { return nil }
+        let reason = progressMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        return reason.isEmpty ? nil : reason
+    }
+
+    var isWaitingForSafeMemory: Bool {
+        pendingReason?.hasPrefix("Waiting for safe memory") == true
+    }
+
+    var pendingReasonDetail: String? {
+        guard let pendingReason else { return nil }
+        let prefix = "Waiting for safe memory · "
+        if pendingReason.hasPrefix(prefix) {
+            return String(pendingReason.dropFirst(prefix.count))
+        }
+        return pendingReason
+    }
     
     var processingTime: TimeInterval? {
         guard let start = startedAt else { return nil }
@@ -338,7 +359,7 @@ struct TranscriptionJob: Identifiable, Equatable {
     var detailedProgressMessage: String {
         switch progressPhase {
         case .waiting:
-            return "Waiting to start..."
+            return progressMessage.isEmpty ? "Waiting to start..." : progressMessage
         case .preparingAudio:
             return "Preparing audio file..."
         case .splittingChunks:

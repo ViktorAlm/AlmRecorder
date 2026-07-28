@@ -169,7 +169,7 @@ public enum MCPWireCoding {
 
 public enum AlmRecorderMCP {
     public static let protocolVersion = 2
-    public static let serverVersion = "0.2.0"
+    public static let serverVersion = "0.3.0"
     public static let cancellationMethod = "_cancel_request"
     public static let maximumRequestBytes = 2 * 1_024 * 1_024
     public static let maximumResponseBytes = 16 * 1_024 * 1_024

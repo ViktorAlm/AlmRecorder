@@ -55,7 +55,8 @@ Search and browse share these filters:
 Search modes are `keyword`, `semantic`, `ann`, `hybrid`, and `auto`; `exact` remains a deprecated
 alias for `keyword`. `semantic` is vector-only and can use an exact filtered cosine scan for recall.
 `ann` always uses vectorlite HNSW. Responses report the actual mode and vector strategy, filtered
-index counts, ANN candidates examined, and `complete`.
+index counts and `complete`. The raw shared-index ANN candidate count is privacy-redacted because
+it can include locally hidden recordings; ANN therefore reports `complete: false` conservatively.
 
 ## Privacy and behavior
 
@@ -64,11 +65,21 @@ index counts, ANN candidates examined, and `complete`.
 - The bridge authenticates every app request with a rotatable 256-bit token.
 - Metadata reads are the baseline. Transcript-derived content and writes are separate Settings
   grants; note/comment writes require both content and write access.
+- Every recording detail view has an **Allow MCP clients to access this recording** switch. Tags
+  also have a **Hide from MCP** switch in Settings → Tags. Either denial wins.
+- A recording hidden directly or by a tag is treated as nonexistent across listing, direct lookup,
+  keyword/semantic/ANN/hybrid search, resources, prompts, comments, meeting notes, writes, and
+  aggregate/index statistics. Direct or cached IDs return `not_found`.
+- Privacy-blocking tags are local-only controls: they are omitted from the MCP tag catalog and MCP
+  clients cannot add or remove them. Changing recording or tag privacy cancels active MCP work.
 - Hidden transcript lines never appear in MCP transcript or search results.
 - MCP semantic search only uses an embedding model that is already loaded. It never initiates a
   model download.
 - Mutations and reads are recorded in `mcp_audit_log` without content or tokens. Comments support retry-safe idempotency keys, and
   comments and meeting notes support optimistic-concurrency timestamps.
 - Requests have socket deadlines, per-client concurrency/rate limits, a semantic single-flight
-  limit, and end-to-end cancellation. Permission changes and token rotation cancel active work.
+  limit, and end-to-end cancellation. Permission, token, and recording-privacy changes cancel
+  active work.
+- AlmRecorder itself does not upload recording data, but an MCP client may send retrieved data to
+  an external or cloud model. Enable access only for recordings appropriate for that client.
 - Rotate the token immediately if a copied client configuration is exposed.

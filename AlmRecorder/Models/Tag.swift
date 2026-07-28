@@ -9,6 +9,7 @@ struct Tag: Codable, Identifiable, Hashable {
     let createdAt: Date
     let externalId: String?
     let updatedAt: Date?
+    var hidesRecordingsFromMCP: Bool = false
 
     /// Initialize from database row
     init?(row: [String: Any?]) {
@@ -25,6 +26,7 @@ struct Tag: Codable, Identifiable, Hashable {
         self.createdAt = createdAt
         self.externalId = row["external_id"] as? String
         self.updatedAt = row["updated_at"] as? Date
+        self.hidesRecordingsFromMCP = row["mcp_hidden"] as? Bool ?? false
     }
 
     /// Initialize directly
@@ -35,7 +37,8 @@ struct Tag: Codable, Identifiable, Hashable {
         description: String? = nil,
         createdAt: Date = Date(),
         externalId: String? = nil,
-        updatedAt: Date? = nil
+        updatedAt: Date? = nil,
+        hidesRecordingsFromMCP: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -44,5 +47,6 @@ struct Tag: Codable, Identifiable, Hashable {
         self.createdAt = createdAt
         self.externalId = externalId
         self.updatedAt = updatedAt
+        self.hidesRecordingsFromMCP = hidesRecordingsFromMCP
     }
 }

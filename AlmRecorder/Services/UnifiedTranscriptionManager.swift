@@ -30,6 +30,9 @@ class UnifiedTranscriptionManager: ObservableObject {
     
     // Track the last created recording ID for transcribeWithResult
     private var lastCreatedRecordingId: Int64?
+    /// Exact retryable resource failure from the last serialized transcription. The queue consumes
+    /// this so an OOM or proactive memory stop returns the job to `.pending` instead of `.failed`.
+    private var lastResourceFailure: TranscriptionError?
     
     // MARK: - Init
     private init() {
@@ -88,6 +91,7 @@ class UnifiedTranscriptionManager: ObservableObject {
         
         // Reset the last created recording ID before transcribing
         self.lastCreatedRecordingId = nil
+        self.lastResourceFailure = nil
         
         // Call the regular transcribe method with progress handler
         let item = await transcribe(
@@ -135,6 +139,11 @@ class UnifiedTranscriptionManager: ObservableObject {
         logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Returning - Item: \(item.status), Result: \(capturedResult != nil), RecordingID: \(capturedRecordingId ?? -1)")
         
         return (item, capturedResult, capturedRecordingId)
+    }
+
+    func consumeLastResourceFailure() -> TranscriptionError? {
+        defer { lastResourceFailure = nil }
+        return lastResourceFailure
     }
     
     /// Transcribe audio from any source and automatically save to history
@@ -365,6 +374,14 @@ class UnifiedTranscriptionManager: ObservableObject {
             }
         } catch {
             // For errors, still create an item but with failed status
+            if let transcriptionError = error as? TranscriptionError {
+                switch transcriptionError {
+                case .gpuOutOfMemory, .resourcesUnavailable:
+                    lastResourceFailure = transcriptionError
+                default:
+                    break
+                }
+            }
             transcript = ""
             status = .failed
             errorMessage = error.localizedDescription
@@ -511,8 +528,10 @@ class UnifiedTranscriptionManager: ObservableObject {
     
     /// Cancel current transcription
     func cancelTranscription() {
+        whisperService.cancelTranscription()
         voxtralService.cancelTranscription()
         gemmaService.cancelTranscription()
+        vibeVoiceService.cancel()
     }
     
     // MARK: - Utterance Processing

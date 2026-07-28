@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">AlmRecorder ribbon A with compact Yeti-inspired microphone</title>
+  <desc id="description">
+    A balanced speech-ribbon A with a short floating crossbar formed by the
+    base of a compact, front-view desktop microphone.
+  </desc>
+
+  <defs>
+    <mask id="grille-cutouts">
+      <rect x="502" y="438" width="160" height="102" rx="30" fill="white" />
+      <rect x="526" y="460" width="112" height="10" rx="5" fill="black" />
+      <rect x="526" y="478" width="112" height="10" rx="5" fill="black" />
+      <rect x="526" y="496" width="112" height="10" rx="5" fill="black" />
+      <rect x="526" y="514" width="112" height="10" rx="5" fill="black" />
+    </mask>
+  </defs>
+
+  <g shape-rendering="geometricPrecision">
+    <!-- Equal-weight 104 px diagonal ribbons. -->
+    <path
+      id="voice-ribbon"
+      d="
+        M132 778
+        H168
+        C192 778 208 760 220 736
+        L241 695
+        C251 675 269 672 283 691
+        L303 718
+        C317 737 343 731 351 708
+        L496 264
+        C506 233 532 212 565 212
+        H604
+      "
+      fill="none"
+      stroke="#859477"
+      stroke-width="104"
+      stroke-linecap="butt"
+      stroke-linejoin="round"
+    />
+
+    <path
+      id="transcript-ribbon"
+      d="M604 212 L822 778"
+      fill="none"
+      stroke="#252824"
+      stroke-width="104"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <!-- Wide mesh head: deliberately squat rather than capsule-shaped. -->
+    <rect
+      id="microphone-grille"
+      x="502"
+      y="438"
+      width="160"
+      height="102"
+      rx="30"
+      fill="#252824"
+      mask="url(#grille-cutouts)"
+    />
+
+    <!-- Short blue body. The grille and yoke carry the identity at logo scale. -->
+    <path
+      id="microphone-body"
+      d="
+        M522 526
+        H642
+        V582
+        C642 598 629 611 613 611
+        H551
+        C535 611 522 598 522 582
+        Z
+      "
+      fill="#466A7A"
+    />
+
+    <!-- Side pivots and broad U-yoke make the desktop-mic silhouette explicit. -->
+    <circle cx="500" cy="540" r="13" fill="#466A7A" />
+    <circle cx="664" cy="540" r="13" fill="#466A7A" />
+    <path
+      id="microphone-yoke"
+      d="
+        M500 540
+        V568
+        C500 600 526 626 558 626
+        H606
+        C638 626 664 600 664 568
+        V540
+      "
+      fill="none"
+      stroke="#466A7A"
+      stroke-width="18"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <!-- The compact base is the A's short, non-spanning crossbar. -->
+    <rect
+      id="short-crossbar"
+      x="524"
+      y="616"
+      width="116"
+      height="28"
+      rx="14"
+      fill="#252824"
+    />
+  </g>
+</svg>

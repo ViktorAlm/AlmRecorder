@@ -34,6 +34,20 @@ struct SpeakerPipelineSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Section("Continuous global identity") {
+                Toggle(
+                    "Reconcile voices after new recordings",
+                    isOn: $settings.continuousReconciliationEnabled
+                )
+                Text(
+                    "Uses your private calibration labels and held-out safety labels to merge "
+                        + "and split automatic People assignments. It writes only when the safety "
+                        + "set has zero false merges, and every run can be undone in Evaluation."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()

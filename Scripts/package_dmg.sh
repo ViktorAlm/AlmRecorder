@@ -42,12 +42,15 @@ cp "$REL/$APP_NAME" "$CONTENTS/MacOS/$APP_NAME"
 cp "$REL/AlmRecorderMCPBridge" "$CONTENTS/MacOS/AlmRecorderMCPBridge"
 cp "$ROOT/AlmRecorder/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/AlmRecorder/Resources/AppIcon.icns" "$RES/AppIcon.icns"   # Dock/Finder icon (CFBundleIconFile)
+cp "$ROOT/AlmRecorder/Assets.xcassets/MenuBarIcon.imageset/menubar.pdf" \
+   "$RES/MenuBarIcon.pdf"
 
 # App's own resources — resolved at runtime via Bundle.main (THIS is what fixes the vectorlite crash)
 cp -R "$ROOT/AlmRecorder/Resources/Libraries" "$RES/Libraries"
 cp -R "$ROOT/AlmRecorder/Resources/Binaries"  "$RES/Binaries"
 cp -R "$ROOT/AlmRecorder/Resources/Models"    "$RES/Models"
 cp -R "$ROOT/AlmRecorder/Resources/Python"    "$RES/Python"
+cp -R "$ROOT/AlmRecorder/Resources/Licenses"  "$RES/Licenses"
 
 # VibeVoice installs its pinned MLX-Audio environment on first use. Bundle the standalone uv
 # executable when it is available on the build Mac so installed copies do not depend on Homebrew.
@@ -116,6 +119,8 @@ ok=1
 [ -f "$RES/Libraries/vectorlite.dylib" ]       && echo "  ✓ vectorlite.dylib"        || { echo "  ✗ vectorlite.dylib MISSING"; ok=0; }
 [ -f "$RES/Libraries/libsqlite3_custom.dylib" ] && echo "  ✓ libsqlite3_custom.dylib" || { echo "  ✗ custom SQLite MISSING"; ok=0; }
 [ -f "$RES/Binaries/whisper-cli" ]              && echo "  ✓ whisper-cli"             || echo "  ! whisper-cli missing"
+[ -x "$RES/Binaries/vibeasr-stream-server" ]    && echo "  ✓ VibeASR realtime server" || echo "  ! VibeASR server missing"
+[ -f "$RES/Licenses/VibeASR.cpp/LICENSE" ]      && echo "  ✓ VibeASR license"          || echo "  ! VibeASR license missing"
 [ -f "$RES/Binaries/uv" ]                       && echo "  ✓ uv (VibeVoice installer)" || echo "  ! bundled uv missing"
 [ -f "$RES/Licenses/uv/LICENSE-MIT" ]           && echo "  ✓ uv licenses"              || echo "  ! uv licenses missing"
 [ -x "$CONTENTS/MacOS/AlmRecorderMCPBridge" ]   && echo "  ✓ MCP stdio bridge"         || { echo "  ✗ MCP bridge MISSING"; ok=0; }

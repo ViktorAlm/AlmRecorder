@@ -51,10 +51,34 @@ class GRDBTagRepository {
         }
     }
 
+    func setHidesRecordingsFromMCP(id: Int64, hides: Bool) throws {
+        try db.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE tags
+                    SET mcp_hidden = ?, updated_at = ?
+                    WHERE id = ? AND mcp_hidden <> ?
+                """,
+                arguments: [hides, Date(), id, hides]
+            )
+            if db.changesCount > 0 {
+                MCPPrivacyRevisionStore.shared.invalidate()
+            }
+        }
+    }
+
     /// Delete a tag (cascade removes recording_tags entries)
     func deleteTag(id: Int64) throws {
         try db.write { db in
+            let hidRecordings = try Bool.fetchOne(
+                db,
+                sql: "SELECT mcp_hidden FROM tags WHERE id = ?",
+                arguments: [id]
+            ) ?? false
             try db.execute(sql: "DELETE FROM tags WHERE id = ?", arguments: [id])
+            if hidRecordings && db.changesCount > 0 {
+                MCPPrivacyRevisionStore.shared.invalidate()
+            }
         }
     }
 
@@ -67,10 +91,19 @@ class GRDBTagRepository {
                 sql: "INSERT OR IGNORE INTO recording_tags (recording_id, tag_id) VALUES (?, ?)",
                 arguments: [recordingId, tagId]
             )
+            let changed = db.changesCount > 0
             try db.execute(
                 sql: "UPDATE recordings SET updated_at = ? WHERE id = ?",
                 arguments: [Date(), recordingId]
             )
+            let hidesFromMCP = try Bool.fetchOne(
+                db,
+                sql: "SELECT mcp_hidden FROM tags WHERE id = ?",
+                arguments: [tagId]
+            ) ?? false
+            if changed && hidesFromMCP {
+                MCPPrivacyRevisionStore.shared.invalidate()
+            }
         }
     }
 
@@ -81,11 +114,20 @@ class GRDBTagRepository {
                 sql: "DELETE FROM recording_tags WHERE recording_id = ? AND tag_id = ?",
                 arguments: [recordingId, tagId]
             )
-            if db.changesCount > 0 {
+            let changed = db.changesCount > 0
+            if changed {
+                let hidFromMCP = try Bool.fetchOne(
+                    db,
+                    sql: "SELECT mcp_hidden FROM tags WHERE id = ?",
+                    arguments: [tagId]
+                ) ?? false
                 try db.execute(
                     sql: "UPDATE recordings SET updated_at = ? WHERE id = ?",
                     arguments: [Date(), recordingId]
                 )
+                if hidFromMCP {
+                    MCPPrivacyRevisionStore.shared.invalidate()
+                }
             }
         }
     }
@@ -165,5 +207,6 @@ extension Tag {
         self.createdAt = createdAt
         self.externalId = row["external_id"]
         self.updatedAt = row["updated_at"]
+        self.hidesRecordingsFromMCP = row["mcp_hidden"] ?? false
     }
 }

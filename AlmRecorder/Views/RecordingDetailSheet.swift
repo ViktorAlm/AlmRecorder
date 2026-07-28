@@ -4,6 +4,21 @@ import UniformTypeIdentifiers
 
 struct RecordingDetailSheet: View {
     let recording: Recording
+    let initialUtteranceId: Int64?
+    let initialTimestamp: TimeInterval?
+    let initialSearchQuery: String?
+
+    init(
+        recording: Recording,
+        initialUtteranceId: Int64? = nil,
+        initialTimestamp: TimeInterval? = nil,
+        initialSearchQuery: String? = nil
+    ) {
+        self.recording = recording
+        self.initialUtteranceId = initialUtteranceId
+        self.initialTimestamp = initialTimestamp
+        self.initialSearchQuery = initialSearchQuery
+    }
 
     @Environment(\.dismiss) var dismiss
 
@@ -28,6 +43,8 @@ struct RecordingDetailSheet: View {
     @State private var speakerReviewStatus: RecordingSpeakerReviewStatus?
     @State private var showSpeakerGoldReview = false
     @State private var speakerGoldMessage: String?
+    @State private var didApplyInitialSearchFocus = false
+    @State private var focusedSearchUtteranceId: Int64?
 
     // Transcript cleanup: soft-hidden lines + manual cleanup pass
     @State private var hiddenUtterances: [Utterance] = []
@@ -50,20 +67,32 @@ struct RecordingDetailSheet: View {
             Divider()
 
             // Content
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // LLM-generated summary + topics
-                    insightsSection
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        // LLM-generated summary + topics
+                        insightsSection
 
-                    // Tags (includes generated tags)
-                    tagsSection
+                        if let recordingId = recording.id {
+                            MCPRecordingPrivacyView(recordingId: recordingId)
+                        }
 
-                    Divider()
+                        // Tags (includes generated tags)
+                        tagsSection
 
-                    // Transcript
-                    transcriptSection
+                        Divider()
+
+                        // Transcript
+                        transcriptSection
+                    }
+                    .padding(20)
                 }
-                .padding(20)
+                .onAppear {
+                    applyInitialSearchFocus(using: proxy)
+                }
+                .onChange(of: utterances.count) { _ in
+                    applyInitialSearchFocus(using: proxy)
+                }
             }
 
             Divider()
@@ -77,7 +106,12 @@ struct RecordingDetailSheet: View {
             loadUtterances()
             loadSpeakers()
             loadSpeakerReviewStatus()
-            if let path = recording.filePath { player.load(path: path) }
+            if let path = recording.filePath {
+                player.load(path: path)
+                if let initialTimestamp {
+                    player.seek(to: initialTimestamp, autoplay: false)
+                }
+            }
         }
         .onDisappear { player.stop(); saveTitleIfChanged() }
         .sheet(isPresented: $showMeeting) {
@@ -363,6 +397,7 @@ struct RecordingDetailSheet: View {
         let isCurrent = player.isLoaded
             && player.currentTime >= utterance.startTime
             && player.currentTime < max(utterance.endTime, utterance.startTime + 0.01)
+        let isSearchTarget = focusedSearchUtteranceId == utterance.id
         let hasAudio = recording.filePath != nil
 
         return VStack(alignment: .leading, spacing: 4) {
@@ -374,6 +409,16 @@ struct RecordingDetailSheet: View {
                     .foregroundColor(.secondary)
 
                 cleanupBadges(for: utterance)
+
+                if isSearchTarget {
+                    Label("Search result", systemImage: "magnifyingglass")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.12))
+                        .clipShape(Capsule())
+                }
 
                 Spacer()
 
@@ -427,7 +472,14 @@ struct RecordingDetailSheet: View {
                     }
                 }
             } else {
-                Text(utterance.text)
+                Text(
+                    isSearchTarget
+                        ? SearchTextHighlighter.attributedString(
+                            utterance.text,
+                            query: initialSearchQuery ?? ""
+                        )
+                        : AttributedString(utterance.text)
+                )
                     .font(.body)
                     .foregroundColor(.primary)
                     .textSelection(.enabled)
@@ -436,12 +488,22 @@ struct RecordingDetailSheet: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isCurrent ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.03))
+        .background(
+            (isCurrent || isSearchTarget)
+                ? Color.accentColor.opacity(isCurrent ? 0.14 : 0.09)
+                : Color.primary.opacity(0.03)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isCurrent ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+                .stroke(
+                    (isCurrent || isSearchTarget)
+                        ? Color.accentColor.opacity(0.5)
+                        : Color.clear,
+                    lineWidth: 1
+                )
         )
         .cornerRadius(8)
+        .id(transcriptAnchor(for: utterance))
         .contentShape(Rectangle())
         .onTapGesture {
             if hasAudio { player.seek(to: utterance.startTime) }
@@ -678,6 +740,36 @@ struct RecordingDetailSheet: View {
     }
 
     // MARK: - Actions
+
+    private func applyInitialSearchFocus(using proxy: ScrollViewProxy) {
+        guard !didApplyInitialSearchFocus,
+              initialUtteranceId != nil || initialTimestamp != nil,
+              !utterances.isEmpty else { return }
+
+        let target = initialUtteranceId.flatMap { utteranceId in
+            utterances.first { $0.id == utteranceId }
+        } ?? initialTimestamp.flatMap { timestamp in
+            utterances.min {
+                abs($0.startTime - timestamp) < abs($1.startTime - timestamp)
+            }
+        }
+        guard let target else { return }
+
+        focusedSearchUtteranceId = target.id
+        didApplyInitialSearchFocus = true
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.25)) {
+                proxy.scrollTo(transcriptAnchor(for: target), anchor: .center)
+            }
+        }
+    }
+
+    private func transcriptAnchor(for utterance: Utterance) -> String {
+        if let id = utterance.id {
+            return "recording-detail-utterance-\(id)"
+        }
+        return "recording-detail-index-\(utterance.utteranceIndex)"
+    }
 
     private func loadUtterances() {
         guard let recordingId = recording.id else { return }

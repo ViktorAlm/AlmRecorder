@@ -81,7 +81,17 @@ def probe(output: str) -> None:
 
 
 def transcribe(args: argparse.Namespace) -> None:
+    import mlx.core as mx
     from mlx_audio.stt.utils import load
+
+    # A VibeVoice helper performs one inference and exits, so retaining MLX's free allocation
+    # cache cannot speed up a later request. Disable it to return transient buffers immediately.
+    # The MLX memory limit is only an allocator guideline, not our primary safety boundary; the
+    # parent process also monitors macOS compressor, swap, pressure, and reclaimable headroom.
+    mx.set_cache_limit(0)
+    if args.memory_limit_bytes:
+        mx.set_memory_limit(args.memory_limit_bytes)
+    mx.reset_peak_memory()
 
     started = time.monotonic()
     model = load(args.model)
@@ -96,8 +106,6 @@ def transcribe(args: argparse.Namespace) -> None:
 
     peak_memory_gb = None
     try:
-        import mlx.core as mx
-
         peak_memory_gb = float(mx.get_peak_memory()) / 1_000_000_000
     except Exception:
         pass
@@ -130,6 +138,7 @@ def main() -> int:
     transcribe_parser.add_argument("--context")
     transcribe_parser.add_argument("--max-tokens", type=int, default=65536)
     transcribe_parser.add_argument("--temperature", type=float, default=0.0)
+    transcribe_parser.add_argument("--memory-limit-bytes", type=int)
     transcribe_parser.add_argument("--output", required=True)
 
     args = parser.parse_args()

@@ -64,6 +64,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             UNUserNotificationCenter.current().delegate = self
             NotificationManager.shared.registerMeetingCategories()
         }
+
+        RealtimeDictationController.shared.synchronizeEnabledState()
+
+        // Window restoration can retain a frame from another monitor or a previous display
+        // arrangement. If less than half of the main window is visible, bring it back onto the
+        // current screen instead of leaving only its bottom status bar reachable.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            self.restoreMainWindowToVisibleScreenIfNeeded()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        RealtimeDictationController.shared.shutdown()
+    }
+
+    private func restoreMainWindowToVisibleScreenIfNeeded() {
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }),
+              let screen = window.screen ?? NSScreen.main else {
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        let currentFrame = window.frame
+        let intersection = currentFrame.intersection(visibleFrame)
+        let visibleArea = intersection.isNull ? 0 : intersection.width * intersection.height
+        let windowArea = max(1, currentFrame.width * currentFrame.height)
+        let isMostlyOffscreen = visibleArea < windowArea * 0.5
+        let isLargerThanScreen = currentFrame.width > visibleFrame.width
+            || currentFrame.height > visibleFrame.height
+
+        guard isMostlyOffscreen || isLargerThanScreen else { return }
+
+        let size = NSSize(
+            width: min(max(currentFrame.width, 1100), visibleFrame.width),
+            height: min(max(currentFrame.height, 680), visibleFrame.height)
+        )
+        let origin = NSPoint(
+            x: visibleFrame.midX - size.width / 2,
+            y: visibleFrame.midY - size.height / 2
+        )
+        window.setFrame(NSRect(origin: origin, size: size), display: true, animate: false)
     }
 
     // Show meeting prompts even when AlmRecorder is foreground.
@@ -170,6 +211,8 @@ struct AlmRecorderApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
+        .defaultSize(width: 1224, height: 768)
+        .defaultPosition(.center)
         // .contentMinSize: window min = content min (900x600) but freely resizable larger, with
         // the content filling the window. .contentSize pinned the window to the content's ideal
         // size, which clipped the bottom safe-area status bar and made resizing feel broken.
@@ -282,22 +325,14 @@ struct MenuBarIcon: View {
     
     var body: some View {
         HStack(spacing: 2) {
-            if controller.isRecording {
-                // Recording indicator
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .foregroundColor(.red)
-            } else if controller.isProcessing {
-                // Processing indicator
-                Image(systemName: "brain")
-                    .foregroundColor(.blue)
-            } else {
-                // Normal state — the AlmRecorder mark (template image; macOS tints it for the menu bar)
-                Image("MenuBarIcon", bundle: .module)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 18, height: 18)
-            }
+            // Keep the product mark stable in every state. Recording and queue activity are
+            // communicated by the tooltip and adjacent count instead of replacing the identity
+            // with unrelated SF Symbols.
+            packagedMenuBarMark
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18, height: 18)
             
             // Show queue count if there are items
             if controller.queueCount > 0 {
@@ -310,6 +345,18 @@ struct MenuBarIcon: View {
             }
         }
         .help(controller.isRecording ? "Recording... (\(formatTime(controller.recordingDuration)))" : "AlmRecorder - Click to start recording")
+    }
+
+    /// SwiftPM's generated `Bundle.module` location is outside the legal structure of a signed
+    /// macOS `.app`. Load the packaged PDF from Contents/Resources instead, with a system-symbol
+    /// fallback for unbundled development runs.
+    private var packagedMenuBarMark: Image {
+        if let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "pdf"),
+           let image = NSImage(contentsOf: url) {
+            image.isTemplate = true
+            return Image(nsImage: image)
+        }
+        return Image(systemName: "waveform")
     }
     
     private func formatTime(_ duration: TimeInterval) -> String {

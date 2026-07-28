@@ -8,6 +8,7 @@ VERSION="1.0.0"
 BUILD_DIR="./build"
 DIST_DIR="./dist"
 RESOURCES_DIR="$BUILD_DIR/$APP_NAME.app/Contents/Resources"
+BUILD_CONFIGURATION="${ALMREC_BUILD_CONFIGURATION:-release}"
 
 echo "📦 Packaging $APP_NAME v$VERSION..."
 
@@ -18,8 +19,14 @@ mkdir -p "$RESOURCES_DIR/Binaries"
 
 # Step 1: Build the app
 echo "🔨 Building Swift app..."
-swift build -c release
-cp -r .build/release/$APP_NAME "$BUILD_DIR/"
+# Keep packaging itself from creating another memory spike on unified-memory Macs. Callers can
+# override this, but two compiler jobs is a safe default for the 24 GB development machine.
+if [ "${ALMREC_SKIP_SWIFT_BUILD:-0}" != "1" ]; then
+    swift build -c "$BUILD_CONFIGURATION" --jobs "${ALMREC_BUILD_JOBS:-2}"
+else
+    echo "Using previously validated $BUILD_CONFIGURATION build to avoid a memory-heavy rebuild"
+fi
+cp -r ".build/$BUILD_CONFIGURATION/$APP_NAME" "$BUILD_DIR/"
 
 # Step 2: Package llama.cpp tools (transcription + text) and their matching dylibs
 echo "📦 Packaging llama.cpp tools..."
@@ -36,7 +43,12 @@ cp -R ./AlmRecorder/Resources/Libraries/. "$RESOURCES_DIR/Libraries/"
 cp -R ./AlmRecorder/Resources/Models/. "$RESOURCES_DIR/Models/"
 mkdir -p "$RESOURCES_DIR/Python"
 cp -R ./AlmRecorder/Resources/Python/. "$RESOURCES_DIR/Python/"
+mkdir -p "$RESOURCES_DIR/Licenses"
+cp -R ./AlmRecorder/Resources/Licenses/. "$RESOURCES_DIR/Licenses/"
 cp ./AlmRecorder/Resources/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
+cp ./AlmRecorder/Assets.xcassets/MenuBarIcon.imageset/menubar.pdf \
+    "$RESOURCES_DIR/MenuBarIcon.pdf"
+
 if [ -n "${ALMREC_UV_BINARY:-}" ] && [ -x "$ALMREC_UV_BINARY" ]; then
     cp -L "$ALMREC_UV_BINARY" "$RESOURCES_DIR/Binaries/uv"
 elif [ -x /opt/homebrew/bin/uv ]; then
@@ -69,16 +81,16 @@ mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/Frameworks"
 
 # Move executable
 mv "$BUILD_DIR/$APP_NAME" "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/"
-cp ".build/release/AlmRecorderMCPBridge" \
+cp ".build/$BUILD_CONFIGURATION/AlmRecorderMCPBridge" \
     "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/AlmRecorderMCPBridge"
 chmod +x "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/AlmRecorderMCPBridge"
 
 # SwiftPM leaves the binary GRDB dependency as a dynamic framework. Embed it in the standard app
 # location and add that location to the executable's runtime search paths so the packaged app can
 # launch independently of the build directory and Xcode toolchain.
-GRDB_FRAMEWORK=".build/arm64-apple-macosx/release/GRDB.framework"
+GRDB_FRAMEWORK=".build/arm64-apple-macosx/$BUILD_CONFIGURATION/GRDB.framework"
 if [ ! -d "$GRDB_FRAMEWORK" ]; then
-    echo "Error: release GRDB.framework was not produced by SwiftPM"
+    echo "Error: $BUILD_CONFIGURATION GRDB.framework was not produced by SwiftPM"
     exit 1
 fi
 cp -R "$GRDB_FRAMEWORK" "$BUILD_DIR/$APP_NAME.app/Contents/Frameworks/"

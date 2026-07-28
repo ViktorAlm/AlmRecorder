@@ -47,7 +47,8 @@ final class GRDBMeetingNotesRepository {
         agenda: String,
         notes: String,
         ifUpdatedAt: Date? = nil,
-        authorize: (() -> Bool)? = nil
+        authorize: (() -> Bool)? = nil,
+        authorizeEvent: ((Database, String) throws -> Bool)? = nil
     ) throws -> MeetingNotes {
         guard agenda.count <= 100_000, notes.count <= 500_000 else {
             throw MeetingNotesError.contentTooLarge
@@ -56,6 +57,9 @@ final class GRDBMeetingNotesRepository {
         return try db.write { db in
             guard authorize?() ?? true else {
                 throw MeetingNotesError.authorizationRevoked
+            }
+            guard try authorizeEvent?(db, eventId) ?? true else {
+                throw MeetingNotesError.eventNotFound
             }
             let current: Date? = try Date.fetchOne(
                 db,
@@ -84,6 +88,7 @@ final class GRDBMeetingNotesRepository {
     enum MeetingNotesError: LocalizedError {
         case contentTooLarge
         case authorizationRevoked
+        case eventNotFound
         case conflict(currentUpdatedAt: Date?)
 
         var errorDescription: String? {
@@ -92,6 +97,8 @@ final class GRDBMeetingNotesRepository {
                 return "Meeting notes are too large."
             case .authorizationRevoked:
                 return "MCP authorization was revoked."
+            case .eventNotFound:
+                return "Meeting not found."
             case .conflict:
                 return "Meeting notes changed since they were read."
             }

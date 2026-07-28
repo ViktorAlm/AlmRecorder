@@ -807,7 +807,8 @@ enum SpeakerProfileSplitter {
                     state: .manual,
                     source: .globalManual,
                     matcher: "user-profile-split",
-                    refreshProfiles: false
+                    refreshProfiles: false,
+                    goldActionID: "profile-split:\(operationID)"
                 )
                 movedUtterances += utteranceRows.count
                 affectedRecordings.insert(cluster.recordingId)
@@ -1001,6 +1002,12 @@ enum SpeakerProfileSplitter {
             sql: "UPDATE speaker_split_operations SET undone_at = ? WHERE id = ?",
             arguments: [now, operationID]
         )
+        if try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.deleteDerivedLabels(
+                db,
+                actionID: "profile-split:\(operationID)"
+            )
+        }
         try GlobalSpeakerIdentityStore.refreshProfile(db, uuid: sourceSpeakerUUID)
         for recordingId in affectedRecordings {
             try SpeakerGoldReviewStore.invalidateIfReviewed(

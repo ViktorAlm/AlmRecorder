@@ -266,6 +266,8 @@ final class SpeakerPipelineSettings: ObservableObject {
 
     static let profileKey = "speakerPipeline.profile"
     static let customConfigurationKey = "speakerPipeline.customConfiguration.v1"
+    static let continuousReconciliationKey =
+        "speakerPipeline.continuousCalibratedReconciliation"
 
     @Published var selectedProfile: SpeakerPipelineProfile {
         didSet { defaults.set(selectedProfile.rawValue, forKey: Self.profileKey) }
@@ -279,10 +281,24 @@ final class SpeakerPipelineSettings: ObservableObject {
         }
     }
 
+    /// Runs the held-out-gated, reversible reconciler after new recordings arrive. When it is
+    /// enabled but the developer/user has not supplied enough private gold, the safety gate leaves
+    /// assignments untouched; it never falls back to the older merge-only evidence graph.
+    @Published var continuousReconciliationEnabled: Bool {
+        didSet {
+            defaults.set(
+                continuousReconciliationEnabled,
+                forKey: Self.continuousReconciliationKey
+            )
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        continuousReconciliationEnabled =
+            defaults.object(forKey: Self.continuousReconciliationKey) as? Bool ?? true
 
         if let raw = defaults.string(forKey: Self.profileKey),
            let profile = SpeakerPipelineProfile(rawValue: raw) {

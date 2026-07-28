@@ -30,6 +30,7 @@ struct TranscriptReviewInboxView: View {
     @ObservedObject private var settings = GlobalModelSettings.shared
     @ObservedObject private var cleanupQueue = TranscriptCleanupQueueManager.shared
     @State private var isSweeping = false
+    @State private var showReviewTools = false
     @State private var showAdvanced = false
     @ObservedObject private var reviewModel = ReviewInboxModel.shared
     private let utteranceRepo = GRDBUtteranceRepository()
@@ -37,7 +38,7 @@ struct TranscriptReviewInboxView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            tuningBar
+            reviewToolsDisclosure
             Divider()
             if audioHealth.projectorFailure != nil,
                let reason = TranscriptVerificationService.shared.projectorFailureReason {
@@ -91,6 +92,19 @@ struct TranscriptReviewInboxView: View {
         }
         .onDisappear { player.stop() }
         .sheet(item: $fixingItem) { item in fixSheet(item) }
+    }
+
+    private var reviewToolsDisclosure: some View {
+        DisclosureGroup(isExpanded: $showReviewTools) {
+            tuningBar
+                .padding(.top, 8)
+        } label: {
+            Label("Review tools", systemImage: "slider.horizontal.3")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Header
@@ -184,8 +198,6 @@ struct TranscriptReviewInboxView: View {
             }
             .frame(maxWidth: 560, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
     }
 
     private func thresholdSlider(_ title: String, value: Binding<Double>,

@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">AlmRecorder speech-ribbon A with microphone crossbar</title>
+  <desc id="description">
+    A custom uppercase A formed by a sage speech ribbon and charcoal transcript
+    ribbon, with a compact horizontal microphone forming the crossbar.
+  </desc>
+
+  <!--
+    Master palette
+    Voice / speech: #859477
+    Transcript / microphone: #252824
+    Recommended light background: #F4F0E6
+  -->
+
+  <g shape-rendering="geometricPrecision">
+    <path
+      id="voice-ribbon"
+      fill="#859477"
+      d="
+        M132 752
+        H166
+        C188 752 205 739 216 718
+        L237 676
+        C246 657 265 650 281 662
+        C285 665 289 670 292 675
+        L308 699
+        C319 716 342 712 350 692
+        L488 258
+        C500 220 533 194 573 194
+        H625
+        L579 329
+        C570 327 562 333 558 346
+        L421 774
+        C412 803 385 823 354 823
+        C329 823 307 811 293 791
+        L266 753
+        C260 744 247 745 242 755
+        L228 783
+        C217 807 192 823 166 823
+        H132
+        Z
+      "
+    />
+
+    <!--
+      The microphone is an even-odd compound path. The three interior capsules
+      are true transparent cutouts, so they inherit any background color.
+    -->
+    <path
+      id="microphone-crossbar"
+      fill="#252824"
+      fill-rule="evenodd"
+      d="
+        M490 535
+        H724
+        C740 535 752 547 752 563
+        V613
+        C752 629 740 641 724 641
+        H490
+        C461 641 438 617 438 588
+        C438 559 461 535 490 535
+        Z
+
+        M522 565
+        C528 565 533 570 533 576
+        V600
+        C533 606 528 611 522 611
+        C516 611 511 606 511 600
+        V576
+        C511 570 516 565 522 565
+        Z
+
+        M558 565
+        C564 565 569 570 569 576
+        V600
+        C569 606 564 611 558 611
+        C552 611 547 606 547 600
+        V576
+        C547 570 552 565 558 565
+        Z
+
+        M594 565
+        C600 565 605 570 605 576
+        V600
+        C605 606 600 611 594 611
+        C588 611 583 606 583 600
+        V576
+        C583 570 588 565 594 565
+        Z
+      "
+    />
+
+    <path
+      id="transcript-ribbon"
+      fill="#252824"
+      d="
+        M613 194
+        H645
+        C681 194 708 215 721 249
+        L895 771
+        C903 796 884 823 858 823
+        H780
+        C759 823 740 810 733 790
+        L566 349
+        C559 332 561 313 569 296
+        Z
+      "
+    />
+  </g>
+</svg>

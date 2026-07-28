@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1600"
+  height="1600"
+  viewBox="0 0 1600 1600"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">Balanced AlmRecorder ribbon A microphone variants</title>
+  <desc id="description">
+    Four microphone-crossbar variants of the AlmRecorder speech-ribbon A. In
+    every variant, the left and right diagonal ribbons have equal visual weight.
+  </desc>
+
+  <defs>
+    <path
+      id="voice-ribbon-balanced"
+      d="
+        M132 778
+        H168
+        C192 778 208 760 220 736
+        L241 695
+        C251 675 269 672 283 691
+        L303 718
+        C317 737 343 731 351 708
+        L496 264
+        C506 233 532 212 565 212
+        H604
+      "
+      fill="none"
+      stroke="#859477"
+      stroke-width="104"
+      stroke-linecap="butt"
+      stroke-linejoin="round"
+    />
+
+    <path
+      id="transcript-ribbon-balanced"
+      d="M604 212 L822 778"
+      fill="none"
+      stroke="#252824"
+      stroke-width="104"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <g id="variant-solid">
+      <use href="#voice-ribbon-balanced" />
+      <path
+        fill="#252824"
+        fill-rule="evenodd"
+        d="
+          M472 536
+          H780
+          V640
+          H472
+          A52 52 0 0 1 472 536
+          Z
+
+          M492 568
+          A10 10 0 0 1 502 578
+          V598
+          A10 10 0 0 1 482 598
+          V578
+          A10 10 0 0 1 492 568
+          Z
+
+          M528 568
+          A10 10 0 0 1 538 578
+          V598
+          A10 10 0 0 1 518 598
+          V578
+          A10 10 0 0 1 528 568
+          Z
+
+          M564 568
+          A10 10 0 0 1 574 578
+          V598
+          A10 10 0 0 1 554 598
+          V578
+          A10 10 0 0 1 564 568
+          Z
+        "
+      />
+      <use href="#transcript-ribbon-balanced" />
+    </g>
+
+    <g id="variant-slim">
+      <use href="#voice-ribbon-balanced" />
+      <path
+        fill="#252824"
+        fill-rule="evenodd"
+        d="
+          M464 556
+          H776
+          V620
+          H464
+          A32 32 0 0 1 464 556
+          Z
+
+          M490 573
+          A7 7 0 0 1 497 580
+          V596
+          A7 7 0 0 1 483 596
+          V580
+          A7 7 0 0 1 490 573
+          Z
+
+          M518 573
+          A7 7 0 0 1 525 580
+          V596
+          A7 7 0 0 1 511 596
+          V580
+          A7 7 0 0 1 518 573
+          Z
+
+          M546 573
+          A7 7 0 0 1 553 580
+          V596
+          A7 7 0 0 1 539 596
+          V580
+          A7 7 0 0 1 546 573
+          Z
+        "
+      />
+      <use href="#transcript-ribbon-balanced" />
+    </g>
+
+    <g id="variant-voice">
+      <use href="#voice-ribbon-balanced" />
+      <path
+        d="
+          M464 544
+          H776
+          V632
+          H464
+          A44 44 0 0 1 464 544
+          Z
+        "
+        fill="#859477"
+      />
+      <rect x="482" y="570" width="18" height="36" rx="9" fill="#252824" />
+      <rect x="516" y="570" width="18" height="36" rx="9" fill="#252824" />
+      <rect x="550" y="570" width="18" height="36" rx="9" fill="#252824" />
+      <use href="#transcript-ribbon-balanced" />
+    </g>
+
+    <g id="variant-outline">
+      <use href="#voice-ribbon-balanced" />
+      <path
+        d="
+          M464 544
+          H776
+          V632
+          H464
+          A44 44 0 0 1 464 544
+          Z
+        "
+        fill="#F4F0E6"
+        stroke="#252824"
+        stroke-width="20"
+        stroke-linejoin="round"
+      />
+      <rect x="482" y="570" width="16" height="36" rx="8" fill="#252824" />
+      <rect x="514" y="570" width="16" height="36" rx="8" fill="#252824" />
+      <rect x="546" y="570" width="16" height="36" rx="8" fill="#252824" />
+      <use href="#transcript-ribbon-balanced" />
+    </g>
+  </defs>
+
+  <rect width="1600" height="1600" fill="#F4F0E6" />
+  <path d="M800 0 V1600 M0 800 H1600" stroke="#D7D2C7" stroke-width="2" />
+
+  <g transform="translate(68 68) scale(.6484375)">
+    <use href="#variant-solid" />
+  </g>
+  <g transform="translate(868 68) scale(.6484375)">
+    <use href="#variant-slim" />
+  </g>
+  <g transform="translate(68 868) scale(.6484375)">
+    <use href="#variant-voice" />
+  </g>
+  <g transform="translate(868 868) scale(.6484375)">
+    <use href="#variant-outline" />
+  </g>
+</svg>

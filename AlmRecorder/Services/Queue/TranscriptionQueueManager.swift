@@ -79,6 +79,7 @@ class TranscriptionQueueManager: ObservableObject {
     // Worker management
     private var workers: [TranscriptionWorker] = []
     private let workerQueue = DispatchQueue(label: "com.almrecorder.queue.workers", attributes: .concurrent)
+    private var memoryRetryNotBefore: [UUID: Date] = [:]
     
     // MARK: - Init
     
@@ -1428,13 +1429,50 @@ class TranscriptionQueueManager: ObservableObject {
 
         // Scheduled nightly jobs remain durable and visible during the day, but workers may only
         // claim them inside their snapshotted window. A job already processing is allowed to finish.
-        if let nextJob = pendingJobs.first(where: {
+        guard let candidate = pendingJobs.first(where: {
             $0.runSettings.schedulingPolicy?.allows() ?? true
-        }) {
-            return nextJob
+        }) else {
+            return nil
         }
+        if let retryAt = memoryRetryNotBefore[candidate.id], retryAt > Date() {
+            return nil
+        }
+        let profile = TranscriptionResourceProfile.forSelection(
+            candidate.runSettings.engineSelection
+        )
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: profile
+        ) {
+            setMemoryWaitingMessage(
+                jobID: candidate.id,
+                reason: deferral.reason
+            )
+            memoryRetryNotBefore[candidate.id] = Date().addingTimeInterval(
+                deferral.retryAfter
+            )
+            return nil
+        }
+        memoryRetryNotBefore[candidate.id] = nil
+        clearMemoryWaitingMessage(jobID: candidate.id)
+        return candidate
+    }
 
-        return nil
+    private func setMemoryWaitingMessage(jobID: UUID, reason: String) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let message = "Waiting for safe memory · \(reason)"
+        guard jobs[index].progressMessage != message else { return }
+        jobs[index].progressPhase = .waiting
+        jobs[index].progressMessage = message
+        persistJob(jobs[index])
+    }
+
+    private func clearMemoryWaitingMessage(jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }),
+              jobs[index].progressMessage.hasPrefix("Waiting for safe memory") else {
+            return
+        }
+        jobs[index].progressMessage = ""
+        persistJob(jobs[index])
     }
     
     /// Mark job as processing (called by worker)
@@ -1606,6 +1644,34 @@ class TranscriptionQueueManager: ObservableObject {
                 logger.error("[QueueManager] Job failed: \(jobs[index].fileName) - \(error)")
                 jobFailed.send(jobs[index])
             }
+        }
+    }
+
+    /// A model launch was proactively refused or an in-flight model was stopped as memory became
+    /// unsafe. Preserve the job and retry budget; workers will claim it automatically when the
+    /// strict admission check passes again.
+    func deferJobForResources(_ jobId: UUID, reason: String) async {
+        await MainActor.run {
+            guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
+            jobs[index].status = .pending
+            jobs[index].progress = 0
+            jobs[index].progressPhase = .waiting
+            jobs[index].progressMessage = "Waiting for safe memory · \(reason)"
+            jobs[index].workerId = nil
+            jobs[index].startedAt = nil
+            jobs[index].lastHeartbeat = nil
+            jobs[index].error = nil
+            memoryRetryNotBefore[jobId] = Date().addingTimeInterval(30)
+            persistJob(jobs[index])
+            if currentJob?.id == jobId {
+                currentJob = nil
+            }
+            processingCount = jobs.filter { $0.status == .processing }.count
+            updateActiveWorkerCount()
+            updateGlobalProgress()
+            logger.warning(
+                "[QueueManager] Deferred \(jobs[index].fileName) without consuming retry: \(reason)"
+            )
         }
     }
     
@@ -1801,7 +1867,21 @@ class TranscriptionWorker {
     /// Process a single job
     private func process(_ job: TranscriptionJob) async {
         currentJob = job
-        
+
+        let resourceProfile = TranscriptionResourceProfile.forSelection(
+            job.runSettings.engineSelection
+        )
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: resourceProfile
+        ) {
+            await queueManager?.deferJobForResources(
+                job.id,
+                reason: deferral.reason
+            )
+            currentJob = nil
+            return
+        }
+
         // Notify queue manager that this job is being processed
         await queueManager?.markJobProcessing(job.id, workerId: id)
         
@@ -1854,6 +1934,21 @@ class TranscriptionWorker {
             var gpuHeld = true
             defer { if gpuHeld { Task { @MainActor in GPUResourceManager.shared.release(.transcription) } } }
 
+            // Memory can change while waiting for another GPU consumer to release. Re-sample at
+            // the last safe point before any backend is allowed to map model weights.
+            if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+                profile: resourceProfile
+            ) {
+                whisperService.activeCheckpoint = nil
+                whisperService.onVADChunkCompleted = nil
+                await queueManager?.deferJobForResources(
+                    job.id,
+                    reason: deferral.reason
+                )
+                currentJob = nil
+                return
+            }
+
             // Use UnifiedTranscriptionManager to perform transcription with progress
             let unifiedManager = UnifiedTranscriptionManager.shared
 
@@ -1873,6 +1968,21 @@ class TranscriptionWorker {
             // Clear checkpoint state after transcription (success or failure)
             whisperService.activeCheckpoint = nil
             whisperService.onVADChunkCompleted = nil
+
+            if let resourceFailure = unifiedManager.consumeLastResourceFailure() {
+                let reason: String
+                switch resourceFailure {
+                case .gpuOutOfMemory:
+                    reason = "model hit its memory limit; cooling down before retry"
+                case .resourcesUnavailable(let detail):
+                    reason = detail
+                default:
+                    reason = resourceFailure.localizedDescription
+                }
+                await queueManager?.deferJobForResources(job.id, reason: reason)
+                currentJob = nil
+                return
+            }
 
             // Check if transcription failed
             if transcriptionItem.status == .failed {

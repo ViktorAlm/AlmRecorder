@@ -75,7 +75,7 @@ struct DashboardView: View {
                         formattedDuration: viewModel.formattedTotalDuration,
                         speakerCount: viewModel.speakerCount,
                         thisWeekCount: viewModel.thisWeekCount,
-                        onSelectRecordings: { selection = .history },
+                        onSelectRecordings: { selection = .library },
                         onSelectSpeakers: { selection = .speakers },
                         onSelectThisWeek: { viewModel.applyFilter(datePeriod: .thisWeek) }
                     )
@@ -85,7 +85,7 @@ struct DashboardView: View {
                         onSelect: { recording in
                             viewModel.selectedRecording = recording
                         },
-                        onSeeAll: { selection = .history }
+                        onSeeAll: { selection = .library }
                     )
 
                     // Self-hiding: renders nothing while the library has no speakers.
