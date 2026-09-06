@@ -35,6 +35,15 @@ struct GlobalSpeakerCalibrationExample: Equatable, Sendable {
     let samePerson: Bool
 }
 
+struct GlobalSpeakerCalibrationPairScore: Equatable, Sendable {
+    let leftNodeID: String
+    let rightNodeID: String
+    let samePerson: Bool
+    let cosine: Float
+    let cohortNormalized: Double
+    let probability: Double
+}
+
 /// Small regularized logistic backend fitted to the user's direct Same/Different labels.
 ///
 /// The embedding extractor remains WeSpeaker. Calibration learns how its cosine distribution moves
@@ -84,6 +93,7 @@ struct GlobalSpeakerCalibrationModel: Codable, Equatable, Sendable {
 struct GlobalSpeakerCalibrationBackend: Sendable {
     let model: GlobalSpeakerCalibrationModel
     let cohortEmbeddings: [[Float]]
+    let mergeProbability: Double
 }
 
 struct GlobalSpeakerReconciliationMerge: Equatable, Sendable {
@@ -101,6 +111,10 @@ struct GlobalSpeakerReconciliationResult: Equatable, Sendable {
 }
 
 struct GlobalSpeakerReconciliationShadowReport: Equatable, Sendable {
+    let localClusterCount: Int
+    let acousticEvidenceNodeCount: Int
+    let missingAcousticEvidenceCount: Int
+    let acousticEvidenceCoverage: Double
     let evaluatedNodeCount: Int
     let excludedNodeCount: Int
     let existingIdentityCount: Int
@@ -113,6 +127,30 @@ struct GlobalSpeakerReconciliationShadowReport: Equatable, Sendable {
     let samePersonPairCount: Int
     let differentPeoplePairCount: Int
     let learnedCalibration: Bool
+    let calibratedMergeProbability: Double
+    let heldOutPairCount: Int
+    let heldOutSamePersonPairCount: Int
+    let heldOutDifferentPeoplePairCount: Int
+    let heldOutFalseMergePairs: Int
+    let heldOutFalseSplitPairs: Int
+    let heldOutAccuracy: Double?
+    let heldOutPairScores: [GlobalSpeakerCalibrationPairScore]
+    let applyBlockers: [String]
+
+    var canApply: Bool { applyBlockers.isEmpty }
+}
+
+struct GlobalSpeakerReconciliationApplyResult: Equatable, Sendable {
+    let runID: String
+    let changedClusterCount: Int
+    let createdIdentityCount: Int
+    let retiredIdentityCount: Int
+}
+
+struct GlobalSpeakerReconciliationUndoResult: Equatable, Sendable {
+    let runID: String
+    let restoredClusterCount: Int
+    let skippedClusterCount: Int
 }
 
 /// Precision-first, from-scratch global reconciliation.
@@ -450,7 +488,10 @@ enum GlobalSpeakerReconciler {
         }
         let positiveCount = rows.filter { $0.target == 1 }.count
         let negativeCount = rows.count - positiveCount
-        guard rows.count >= 8, positiveCount >= 3, negativeCount >= 3 else {
+        // The product gate promises that three positive and three negative examples are enough
+        // to fit a user-specific calibration. Requiring a larger hidden total here made a fully
+        // balanced 3 + 3 gold set impossible to apply even though the UI reported it as ready.
+        guard rows.count >= 6, positiveCount >= 3, negativeCount >= 3 else {
             var fallback = GlobalSpeakerCalibrationModel.conservativeFallback
             fallback = GlobalSpeakerCalibrationModel(
                 bias: fallback.bias,
@@ -564,6 +605,68 @@ enum GlobalSpeakerReconciler {
             configuration: configuration
         )
         return (model, result)
+    }
+
+    /// Select a precision-first operating point from development labels only. The held-out set is
+    /// never consulted here; it is reserved for the apply gate. A small margin above the hardest
+    /// development impostor adapts the decision boundary to this user's microphones without
+    /// baking the arbitrary logistic probability scale into production.
+    static func recommendedMergeProbability(
+        nodes: [GlobalSpeakerBenchmarkNode],
+        examples: [GlobalSpeakerCalibrationExample],
+        model: GlobalSpeakerCalibrationModel,
+        cohortEmbeddings: [[Float]]? = nil
+    ) -> Double {
+        guard model.isLearned else { return Configuration().mergeProbability }
+        let featureSpace = FeatureSpace(
+            nodes: nodes,
+            cohortEmbeddings: cohortEmbeddings
+        )
+        let negativeProbabilities = examples.compactMap { example -> Double? in
+            guard !example.samePerson,
+                  let feature = featureSpace.features(
+                    example.leftNodeID,
+                    example.rightNodeID
+                  )
+            else { return nil }
+            return model.probability(
+                cosine: feature.cosine,
+                cohortNormalized: feature.cohort
+            )
+        }
+        guard let hardestImpostor = negativeProbabilities.max() else {
+            return Configuration().mergeProbability
+        }
+        return min(0.985, max(0.60, hardestImpostor + 0.03))
+    }
+
+    static func scorePairs(
+        nodes: [GlobalSpeakerBenchmarkNode],
+        examples: [GlobalSpeakerCalibrationExample],
+        model: GlobalSpeakerCalibrationModel,
+        cohortEmbeddings: [[Float]]? = nil
+    ) -> [GlobalSpeakerCalibrationPairScore] {
+        let featureSpace = FeatureSpace(
+            nodes: nodes,
+            cohortEmbeddings: cohortEmbeddings
+        )
+        return examples.compactMap { example in
+            guard let feature = featureSpace.features(
+                example.leftNodeID,
+                example.rightNodeID
+            ) else { return nil }
+            return GlobalSpeakerCalibrationPairScore(
+                leftNodeID: example.leftNodeID,
+                rightNodeID: example.rightNodeID,
+                samePerson: example.samePerson,
+                cosine: feature.cosine,
+                cohortNormalized: feature.cohort,
+                probability: model.probability(
+                    cosine: feature.cosine,
+                    cohortNormalized: feature.cohort
+                )
+            )
+        }
     }
 
     private static func reconcile(
@@ -768,14 +871,281 @@ enum GlobalSpeakerReconciler {
 
 /// Loads the complete local-cluster graph and produces a no-write reconciliation preview.
 enum GlobalSpeakerLibraryReconciliation {
+    /// A from-scratch result is only representative when most immutable local voices actually have
+    /// acoustic evidence. The remaining tail stays visible for review/backfill instead of being
+    /// silently treated as proof that the library has been reconciled.
+    static func acousticEvidenceBlocker(
+        totalClusterCount: Int,
+        acousticEvidenceNodeCount: Int,
+        minimumCoverage: Double = 0.90
+    ) -> String? {
+        guard totalClusterCount > 0 else { return nil }
+        let covered = min(totalClusterCount, max(0, acousticEvidenceNodeCount))
+        let coverage = Double(covered) / Double(totalClusterCount)
+        guard coverage + 0.000_001 < minimumCoverage else { return nil }
+        return "Acoustic evidence covers \(covered) of \(totalClusterCount) local voices "
+            + "(\(coverage.formatted(.percent.precision(.fractionLength(0))))); "
+            + "run the non-destructive voice-evidence backfill before applying."
+    }
+
     private struct CodableSpan: Codable {
         let start: TimeInterval
         let end: TimeInterval
     }
 
+    private struct PlannedChange {
+        let clusterID: Int64
+        let nodeID: String
+        let previousUUID: String
+        let targetUUID: String
+    }
+
+    private struct WorkingPlan {
+        let report: GlobalSpeakerReconciliationShadowReport
+        let model: GlobalSpeakerCalibrationModel
+        let changes: [PlannedChange]
+        let newIdentityEmbeddings: [String: [Float]]
+        let affectedExistingUUIDs: Set<String>
+    }
+
+    enum ApplyError: LocalizedError {
+        case previewChanged
+        case safetyGate([String])
+        case trustedAssignmentWouldMove(Int64)
+        case noPreview
+
+        var errorDescription: String? {
+            switch self {
+            case .previewChanged:
+                return "Speaker evidence changed. Refresh the preview before applying it."
+            case .safetyGate(let blockers):
+                return blockers.joined(separator: " ")
+            case .trustedAssignmentWouldMove(let clusterID):
+                return "The plan attempted to move protected cluster \(clusterID). Nothing changed."
+            case .noPreview:
+                return "There is not enough clean speaker evidence to build a reconciliation plan."
+            }
+        }
+    }
+
+    static func apply(
+        expectedReport: GlobalSpeakerReconciliationShadowReport
+    ) throws -> GlobalSpeakerReconciliationApplyResult {
+        try GRDBDatabaseManager.shared.write { db in
+            try apply(db, expectedReport: expectedReport)
+        }
+    }
+
+    static func apply(
+        _ db: Database,
+        expectedReport: GlobalSpeakerReconciliationShadowReport
+    ) throws -> GlobalSpeakerReconciliationApplyResult {
+        try GlobalSpeakerIdentityStore.migrate(db)
+        guard let plan = try makeWorkingPlan(db) else { throw ApplyError.noPreview }
+        guard plan.report == expectedReport else { throw ApplyError.previewChanged }
+        guard plan.report.canApply else {
+            throw ApplyError.safetyGate(plan.report.applyBlockers)
+        }
+        return try apply(plan, db: db)
+    }
+
+    /// Reconcile after ingest only when the private development labels have produced a calibrated
+    /// model and the independent held-out labels still show zero false merges. This intentionally
+    /// returns `nil` for an unsafe or no-op preview instead of falling back to the old merge-only
+    /// graph. The whole preview + apply happens in one database write transaction.
+    static func applyLatestIfSafe() throws -> GlobalSpeakerReconciliationApplyResult? {
+        try GRDBDatabaseManager.shared.write { db in
+            try applyLatestIfSafe(db)
+        }
+    }
+
+    static func applyLatestIfSafe(
+        _ db: Database
+    ) throws -> GlobalSpeakerReconciliationApplyResult? {
+        try GlobalSpeakerIdentityStore.migrate(db)
+        guard let plan = try makeWorkingPlan(db),
+              plan.report.canApply,
+              !plan.changes.isEmpty
+        else { return nil }
+        return try apply(plan, db: db)
+    }
+
+    static func undoLatest() throws -> GlobalSpeakerReconciliationUndoResult? {
+        try GRDBDatabaseManager.shared.write { db in
+            try undoLatest(db)
+        }
+    }
+
+    static func undoLatest(
+        _ db: Database
+    ) throws -> GlobalSpeakerReconciliationUndoResult? {
+        guard let run = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT id
+                    FROM speaker_reconciliation_runs
+                    WHERE status = 'active'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """
+            ), let runID: String = run["id"] else { return nil }
+            let members = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT *
+                    FROM speaker_reconciliation_members
+                    WHERE run_id = ?
+                    ORDER BY local_cluster_id
+                """,
+                arguments: [runID]
+            )
+            var restored = 0
+            var skipped = 0
+            var affectedUUIDs: Set<String> = []
+            for row in members {
+                guard let clusterID: Int64 = row["local_cluster_id"],
+                      let previousUUID: String = row["previous_speaker_uuid"],
+                      let previousState: String = row["previous_state"],
+                      let previousSource: String = row["previous_source"],
+                      let previousConfidence: Double = row["previous_confidence"],
+                      let targetUUID: String = row["target_speaker_uuid"]
+                else { continue }
+                let activeRun = try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT reconciliation_run_id
+                        FROM speaker_global_assignments
+                        WHERE local_cluster_id = ?
+                    """,
+                    arguments: [clusterID]
+                )
+                guard activeRun == runID else {
+                    skipped += 1
+                    continue
+                }
+                try db.execute(
+                    sql: """
+                        UPDATE speaker_global_assignments SET
+                            speaker_uuid = ?,
+                            state = ?,
+                            source = ?,
+                            confidence = ?,
+                            score = ?,
+                            margin = ?,
+                            supporting_prototype_count = ?,
+                            matcher = ?,
+                            evidence_json = ?,
+                            operation_id = ?,
+                            reconciliation_run_id = NULL,
+                            updated_at = ?
+                        WHERE local_cluster_id = ?
+                    """,
+                    arguments: [
+                        previousUUID,
+                        previousState,
+                        previousSource,
+                        previousConfidence,
+                        row["previous_score"] as Double?,
+                        row["previous_margin"] as Double?,
+                        row["previous_supporting_prototype_count"] as Int?,
+                        row["previous_matcher"] as String?,
+                        row["previous_evidence_json"] as String?,
+                        row["previous_operation_id"] as Int64?,
+                        Date(),
+                        clusterID,
+                    ]
+                )
+                try db.execute(
+                    sql: """
+                        UPDATE utterances SET
+                            speaker_uuid = ?,
+                            speaker_assignment_source = ?
+                        WHERE local_speaker_cluster_id = ?
+                    """,
+                    arguments: [previousUUID, previousSource, clusterID]
+                )
+                affectedUUIDs.insert(previousUUID)
+                affectedUUIDs.insert(targetUUID)
+                restored += 1
+            }
+
+            let speakerSnapshots = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT *
+                    FROM speaker_reconciliation_speakers
+                    WHERE run_id = ?
+                """,
+                arguments: [runID]
+            )
+            for row in speakerSnapshots {
+                guard let uuid: String = row["speaker_uuid"] else { continue }
+                let wasCreated: Bool = row["was_created"] ?? false
+                if wasCreated {
+                    // Keep the row for audit/recovery, but remove it from active People.
+                    try db.execute(
+                        sql: """
+                            UPDATE speakers SET
+                                identity_state = 'retired',
+                                canonical_uuid = NULL,
+                                updated_at = ?
+                            WHERE uuid = ?
+                        """,
+                        arguments: [Date(), uuid]
+                    )
+                } else {
+                    try db.execute(
+                        sql: """
+                            UPDATE speakers SET
+                                identity_state = ?,
+                                canonical_uuid = ?,
+                                updated_at = ?
+                            WHERE uuid = ?
+                        """,
+                        arguments: [
+                            row["previous_identity_state"] as String? ?? "active",
+                            row["previous_canonical_uuid"] as String?,
+                            Date(),
+                            uuid,
+                        ]
+                    )
+                }
+                affectedUUIDs.insert(uuid)
+            }
+            for uuid in affectedUUIDs {
+                try GlobalSpeakerIdentityStore.refreshProfile(db, uuid: uuid)
+                try SpeakerVoicePrototypeStore.rebuild(
+                    db,
+                    speakerUUID: uuid,
+                    policy: .qualityDurationWeighted
+                )
+            }
+            try db.execute(
+                sql: """
+                    UPDATE speaker_reconciliation_runs
+                    SET status = ?, undone_at = ?
+                    WHERE id = ?
+                """,
+                arguments: [
+                    skipped == 0 ? "undone" : "undone_partial",
+                    Date(),
+                    runID,
+                ]
+            )
+        return GlobalSpeakerReconciliationUndoResult(
+            runID: runID,
+            restoredClusterCount: restored,
+            skippedClusterCount: skipped
+        )
+    }
+
     static func shadowReport(_ db: Database) throws -> GlobalSpeakerReconciliationShadowReport? {
         guard try db.tableExists("speaker_local_clusters"),
               try db.tableExists("speaker_global_assignments") else { return nil }
+        let totalClusterCount = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM speaker_local_clusters"
+        ) ?? 0
         let rows = try Row.fetchAll(
             db,
             sql: """
@@ -838,7 +1208,7 @@ enum GlobalSpeakerLibraryReconciliation {
         }
         guard !nodes.isEmpty else { return nil }
 
-        let labels = try loadPairLabels(db)
+        let labels = try loadReliablePairLabels(db, nodes: nodes)
         let constraints = labels.compactMap { label
             -> GlobalSpeakerReconciliationConstraint? in
             let left = "cluster:\(label.leftClusterId)"
@@ -852,7 +1222,9 @@ enum GlobalSpeakerLibraryReconciliation {
                 return nil
             }
         }
-        let examples = labels.compactMap { label -> GlobalSpeakerCalibrationExample? in
+        let developmentLabels = labels.filter { $0.role == .development }
+        let examples = developmentLabels.compactMap {
+            label -> GlobalSpeakerCalibrationExample? in
             switch label.verdict {
             case .samePerson:
                 return .init(
@@ -870,14 +1242,46 @@ enum GlobalSpeakerLibraryReconciliation {
                 return nil
             }
         }
-        let shadow = GlobalSpeakerReconciler.fitAndReconcile(
+        let model = GlobalSpeakerReconciler.fit(nodes: nodes, examples: examples)
+        let mergeProbability = GlobalSpeakerReconciler.recommendedMergeProbability(
             nodes: nodes,
             examples: examples,
-            constraints: constraints,
-            trustedAnchors: trustedAnchors
+            model: model
         )
-        let model = shadow.model
-        let result = shadow.result
+        let result = GlobalSpeakerReconciler.reconcile(
+            nodes: nodes,
+            model: model,
+            constraints: constraints,
+            trustedAnchors: trustedAnchors,
+            configuration: .init(mergeProbability: mergeProbability)
+        )
+        let developmentConstraints = constraintsFor(developmentLabels)
+        let heldOutLabels = labels.filter {
+            $0.role == .heldOut && $0.verdict.isScored
+        }
+        let heldOutExamples = heldOutLabels.map {
+            GlobalSpeakerCalibrationExample(
+                leftNodeID: "cluster:\($0.leftClusterId)",
+                rightNodeID: "cluster:\($0.rightClusterId)",
+                samePerson: $0.verdict == .samePerson
+            )
+        }
+        let heldOutPairScores = GlobalSpeakerReconciler.scorePairs(
+            nodes: nodes,
+            examples: heldOutExamples,
+            model: model
+        )
+        let safetyResult = GlobalSpeakerReconciler.reconcile(
+            nodes: nodes,
+            model: model,
+            constraints: developmentConstraints,
+            trustedAnchors: trustedAnchors,
+            configuration: .init(mergeProbability: mergeProbability)
+        )
+        let heldOutMetrics = pairMetrics(
+            labels: heldOutLabels,
+            assignments: safetyResult.assignments
+        )
 
         let reliableNodeIDs = Set(nodes.filter(\.reliableForIdentity).map(\.id))
         let currentIdentities = Set(
@@ -902,8 +1306,55 @@ enum GlobalSpeakerLibraryReconciliation {
         let mergeCount = proposedComponents.values.filter { nodeIDs in
             Set(nodeIDs.compactMap { currentIdentityByNode[$0] }).count > 1
         }.count
+        var blockers: [String] = []
+        if let evidenceBlocker = acousticEvidenceBlocker(
+            totalClusterCount: totalClusterCount,
+            acousticEvidenceNodeCount: nodes.count
+        ) {
+            blockers.append(evidenceBlocker)
+        }
+        if !model.isLearned {
+            blockers.append("Need at least 3 Same and 3 Different calibration pairs.")
+        }
+        if heldOutMetrics.samePersonPairCount < 3 {
+            blockers.append("Need 3 held-out Same pairs from separate recordings.")
+        }
+        if heldOutMetrics.differentPeoplePairCount < 3 {
+            blockers.append("Need 3 held-out Different pairs from separate recordings.")
+        }
+        if heldOutMetrics.falseMergePairs > 0 {
+            blockers.append(
+                "\(heldOutMetrics.falseMergePairs) held-out false merge"
+                    + (heldOutMetrics.falseMergePairs == 1 ? "" : "s")
+                    + " must be resolved."
+            )
+        }
+        if heldOutMetrics.samePersonPairCount >= 3 {
+            let correctlyLinkedSamePairs = heldOutMetrics.samePersonPairCount
+                - heldOutMetrics.falseSplitPairs
+            // Global reconciliation must actually reunite locally over-split voices. Zero false
+            // merges is not sufficient when the model simply refuses every merge.
+            if correctlyLinkedSamePairs * 3 < heldOutMetrics.samePersonPairCount * 2 {
+                let recall = Double(correctlyLinkedSamePairs)
+                    / Double(heldOutMetrics.samePersonPairCount)
+                blockers.append(
+                    "Held-out Same recall is "
+                        + recall.formatted(.percent.precision(.fractionLength(0)))
+                        + "; label more cross-recording Same outliers until it reaches 67%."
+                )
+            }
+        }
+        if result.constraintConflictCount > 0 {
+            blockers.append("Resolve conflicting manual/gold speaker constraints.")
+        }
 
         return GlobalSpeakerReconciliationShadowReport(
+            localClusterCount: totalClusterCount,
+            acousticEvidenceNodeCount: nodes.count,
+            missingAcousticEvidenceCount: max(0, totalClusterCount - nodes.count),
+            acousticEvidenceCoverage: totalClusterCount > 0
+                ? Double(nodes.count) / Double(totalClusterCount)
+                : 1,
             evaluatedNodeCount: reliableNodeIDs.count,
             excludedNodeCount: result.excludedNodeCount,
             existingIdentityCount: currentIdentities.count,
@@ -915,7 +1366,473 @@ enum GlobalSpeakerLibraryReconciliation {
             trainingPairCount: model.trainingPairCount,
             samePersonPairCount: model.samePersonPairCount,
             differentPeoplePairCount: model.differentPeoplePairCount,
-            learnedCalibration: model.isLearned
+            learnedCalibration: model.isLearned,
+            calibratedMergeProbability: mergeProbability,
+            heldOutPairCount: heldOutMetrics.evaluatedPairCount,
+            heldOutSamePersonPairCount: heldOutMetrics.samePersonPairCount,
+            heldOutDifferentPeoplePairCount: heldOutMetrics.differentPeoplePairCount,
+            heldOutFalseMergePairs: heldOutMetrics.falseMergePairs,
+            heldOutFalseSplitPairs: heldOutMetrics.falseSplitPairs,
+            heldOutAccuracy: heldOutMetrics.accuracy,
+            heldOutPairScores: heldOutPairScores,
+            applyBlockers: blockers
+        )
+    }
+
+    private static func makeWorkingPlan(_ db: Database) throws -> WorkingPlan? {
+        guard let report = try shadowReport(db) else { return nil }
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT c.id,
+                       c.recording_id,
+                       c.embedding,
+                       c.embedding_turn_count,
+                       c.cohesion,
+                       c.mixture_split_gain,
+                       c.spans_json,
+                       a.speaker_uuid,
+                       a.state,
+                       mixed.verdict AS mixed_verdict
+                FROM speaker_local_clusters c
+                LEFT JOIN speaker_global_assignments a ON a.local_cluster_id = c.id
+                LEFT JOIN speaker_local_cluster_gold_labels mixed
+                  ON mixed.local_cluster_id = c.id
+                 AND mixed.verdict = 'multiple_speakers'
+                WHERE c.embedding IS NOT NULL
+                ORDER BY c.id
+            """
+        )
+        var nodes: [GlobalSpeakerBenchmarkNode] = []
+        var currentIdentityByNode: [String: String] = [:]
+        var currentStateByNode: [String: GlobalSpeakerAssignmentState] = [:]
+        var trustedAnchors: [String: String] = [:]
+        for row in rows {
+            guard let clusterID: Int64 = row["id"],
+                  let recordingID: Int64 = row["recording_id"],
+                  let data: Data = row["embedding"] else { continue }
+            let embedding = VoiceEmbeddingStore.dataToFloats(data)
+            guard embedding.count == SpeakerEmbeddingPolicy.dimension else { continue }
+            let nodeID = "cluster:\(clusterID)"
+            let turnCount: Int = row["embedding_turn_count"] ?? 0
+            let cohesion: Double? = row["cohesion"]
+            let splitGain: Double? = row["mixture_split_gain"]
+            let reliable = (row["mixed_verdict"] as String?) == nil
+                && splitGain == nil
+                && !(turnCount > 1 && (cohesion ?? 1) < 0.35)
+            nodes.append(
+                GlobalSpeakerBenchmarkNode(
+                    id: nodeID,
+                    recordingKey: "recording:\(recordingID)",
+                    recordingId: recordingID,
+                    embedding: embedding,
+                    spans: decodeSpans(row["spans_json"]),
+                    reliableForIdentity: reliable,
+                    goldSpeakerKey: nil,
+                    goldPurity: 0
+                )
+            )
+            if let uuid: String = row["speaker_uuid"] {
+                currentIdentityByNode[nodeID] = uuid
+                let state = GlobalSpeakerAssignmentState(
+                    rawValue: row["state"] ?? ""
+                ) ?? .legacy
+                currentStateByNode[nodeID] = state
+                if state.isTrustedEnrollment {
+                    trustedAnchors[nodeID] = uuid
+                }
+            }
+        }
+        guard !nodes.isEmpty else { return nil }
+
+        let labels = try loadReliablePairLabels(db, nodes: nodes)
+        let developmentLabels = labels.filter { $0.role == .development }
+        let examples = developmentLabels.compactMap { label
+            -> GlobalSpeakerCalibrationExample? in
+            switch label.verdict {
+            case .samePerson:
+                return .init(
+                    leftNodeID: "cluster:\(label.leftClusterId)",
+                    rightNodeID: "cluster:\(label.rightClusterId)",
+                    samePerson: true
+                )
+            case .differentPeople:
+                return .init(
+                    leftNodeID: "cluster:\(label.leftClusterId)",
+                    rightNodeID: "cluster:\(label.rightClusterId)",
+                    samePerson: false
+                )
+            case .mixedOrUnclear, .unsure:
+                return nil
+            }
+        }
+        let model = GlobalSpeakerReconciler.fit(nodes: nodes, examples: examples)
+        let mergeProbability = GlobalSpeakerReconciler.recommendedMergeProbability(
+            nodes: nodes,
+            examples: examples,
+            model: model
+        )
+        let result = GlobalSpeakerReconciler.reconcile(
+            nodes: nodes,
+            model: model,
+            constraints: constraintsFor(labels),
+            trustedAnchors: trustedAnchors,
+            configuration: .init(mergeProbability: mergeProbability)
+        )
+        let reliableNodes = nodes.filter(\.reliableForIdentity)
+        let components = Dictionary(grouping: reliableNodes) {
+            result.assignments[$0.id] ?? "isolated:\($0.id)"
+        }
+
+        struct ExistingIdentity {
+            let uuid: String
+            let hasName: Bool
+            let assignmentCount: Int
+        }
+        let existingIdentities = Dictionary(
+            uniqueKeysWithValues: try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT s.uuid,
+                           TRIM(COALESCE(s.name, '')) != '' AS has_name,
+                           COUNT(a.local_cluster_id) AS assignment_count
+                    FROM speakers s
+                    LEFT JOIN speaker_global_assignments a
+                      ON a.speaker_uuid = s.uuid
+                    GROUP BY s.uuid
+                """
+            ).compactMap { row -> (String, ExistingIdentity)? in
+                guard let uuid: String = row["uuid"] else { return nil }
+                return (
+                    uuid,
+                    ExistingIdentity(
+                        uuid: uuid,
+                        hasName: (row["has_name"] as Bool?) ?? false,
+                        assignmentCount: row["assignment_count"] ?? 0
+                    )
+                )
+            }
+        )
+
+        var targetByComponent: [String: String] = [:]
+        var usedTargets: Set<String> = []
+        for (componentID, members) in components {
+            let anchors = Set(members.compactMap { trustedAnchors[$0.id] })
+            if anchors.count == 1, let anchor = anchors.first {
+                targetByComponent[componentID] = anchor
+                usedTargets.insert(anchor)
+            }
+        }
+        let unanchored = components
+            .filter { targetByComponent[$0.key] == nil }
+            .sorted {
+                if $0.value.count != $1.value.count {
+                    return $0.value.count > $1.value.count
+                }
+                return $0.key < $1.key
+            }
+        var newIdentityEmbeddings: [String: [Float]] = [:]
+        for (componentID, members) in unanchored {
+            let currentCounts = Dictionary(
+                grouping: members.compactMap { currentIdentityByNode[$0.id] },
+                by: { $0 }
+            ).mapValues(\.count)
+            let candidates = currentCounts.keys
+                .filter { !usedTargets.contains($0) && existingIdentities[$0] != nil }
+                .sorted { lhs, rhs in
+                    let left = existingIdentities[lhs]!
+                    let right = existingIdentities[rhs]!
+                    if left.hasName != right.hasName { return left.hasName }
+                    if currentCounts[lhs] != currentCounts[rhs] {
+                        return (currentCounts[lhs] ?? 0) > (currentCounts[rhs] ?? 0)
+                    }
+                    if left.assignmentCount != right.assignmentCount {
+                        return left.assignmentCount > right.assignmentCount
+                    }
+                    return lhs < rhs
+                }
+            let target: String
+            if let existing = candidates.first {
+                target = existing
+            } else {
+                target = UUID().uuidString
+                if let embedding = VoiceMath.meanNormalized(members.map(\.embedding)) {
+                    newIdentityEmbeddings[target] = embedding
+                }
+            }
+            targetByComponent[componentID] = target
+            usedTargets.insert(target)
+        }
+
+        var changes: [PlannedChange] = []
+        var affectedExistingUUIDs: Set<String> = []
+        for (componentID, members) in components {
+            guard let target = targetByComponent[componentID] else { continue }
+            if existingIdentities[target] != nil {
+                affectedExistingUUIDs.insert(target)
+            }
+            for member in members {
+                guard let previous = currentIdentityByNode[member.id],
+                      previous != target,
+                      let clusterID = Int64(member.id.dropFirst("cluster:".count))
+                else { continue }
+                if currentStateByNode[member.id]?.isTrustedEnrollment == true {
+                    throw ApplyError.trustedAssignmentWouldMove(clusterID)
+                }
+                affectedExistingUUIDs.insert(previous)
+                changes.append(
+                    PlannedChange(
+                        clusterID: clusterID,
+                        nodeID: member.id,
+                        previousUUID: previous,
+                        targetUUID: target
+                    )
+                )
+            }
+        }
+        return WorkingPlan(
+            report: report,
+            model: model,
+            changes: changes.sorted { $0.clusterID < $1.clusterID },
+            newIdentityEmbeddings: newIdentityEmbeddings,
+            affectedExistingUUIDs: affectedExistingUUIDs
+        )
+    }
+
+    private static func apply(
+        _ plan: WorkingPlan,
+        db: Database
+    ) throws -> GlobalSpeakerReconciliationApplyResult {
+        let runID = UUID().uuidString
+        let now = Date()
+        try db.execute(
+            sql: """
+                INSERT INTO speaker_reconciliation_runs (
+                    id, status, matcher, calibration_pair_count,
+                    held_out_pair_count, changed_cluster_count,
+                    created_identity_count, created_at
+                ) VALUES (?, 'active', ?, ?, ?, ?, ?, ?)
+            """,
+            arguments: [
+                runID,
+                "calibrated-constrained-v1",
+                plan.model.trainingPairCount,
+                plan.report.heldOutPairCount,
+                plan.changes.count,
+                plan.newIdentityEmbeddings.count,
+                now,
+            ]
+        )
+
+        for uuid in plan.affectedExistingUUIDs.sorted() {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT identity_state, canonical_uuid
+                    FROM speakers
+                    WHERE uuid = ?
+                """,
+                arguments: [uuid]
+            ) else { continue }
+            try db.execute(
+                sql: """
+                    INSERT INTO speaker_reconciliation_speakers (
+                        run_id, speaker_uuid, previous_identity_state,
+                        previous_canonical_uuid, was_created
+                    ) VALUES (?, ?, ?, ?, 0)
+                """,
+                arguments: [
+                    runID,
+                    uuid,
+                    row["identity_state"] as String? ?? "active",
+                    row["canonical_uuid"] as String?,
+                ]
+            )
+        }
+        for (uuid, embedding) in plan.newIdentityEmbeddings.sorted(by: {
+            $0.key < $1.key
+        }) {
+            try db.execute(
+                sql: """
+                    INSERT INTO speaker_reconciliation_speakers (
+                        run_id, speaker_uuid, previous_identity_state,
+                        previous_canonical_uuid, was_created
+                    ) VALUES (?, ?, NULL, NULL, 1)
+                """,
+                arguments: [runID, uuid]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO speakers (
+                        uuid, name, embedding, embedding_count,
+                        total_duration, utterance_count, confidence, notes,
+                        created_at, updated_at, last_seen_at,
+                        identity_state, canonical_uuid
+                    ) VALUES (?, NULL, ?, 1, 0, 0, 0.70, ?, ?, ?, ?, 'active', NULL)
+                """,
+                arguments: [
+                    uuid,
+                    VoiceEmbeddingStore.floatsToData(embedding),
+                    "Created by reversible global speaker reconciliation.",
+                    now,
+                    now,
+                    now,
+                ]
+            )
+        }
+
+        let evidence = """
+            {"matcher":"calibrated-constrained-v1","calibration_pairs":\(plan.model.trainingPairCount),"held_out_pairs":\(plan.report.heldOutPairCount)}
+            """
+        for change in plan.changes {
+            guard let previous = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT *
+                    FROM speaker_global_assignments
+                    WHERE local_cluster_id = ?
+                """,
+                arguments: [change.clusterID]
+            ) else { continue }
+            let state = GlobalSpeakerAssignmentState(
+                rawValue: (previous["state"] as String?) ?? ""
+            ) ?? .legacy
+            guard !state.isTrustedEnrollment else {
+                throw ApplyError.trustedAssignmentWouldMove(change.clusterID)
+            }
+            try db.execute(
+                sql: """
+                    INSERT INTO speaker_reconciliation_members (
+                        run_id, local_cluster_id, previous_speaker_uuid,
+                        previous_state, previous_source, previous_confidence,
+                        previous_score, previous_margin,
+                        previous_supporting_prototype_count, previous_matcher,
+                        previous_evidence_json, previous_operation_id,
+                        target_speaker_uuid
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    runID,
+                    change.clusterID,
+                    previous["speaker_uuid"] as String? ?? change.previousUUID,
+                    previous["state"] as String? ?? GlobalSpeakerAssignmentState.legacy.rawValue,
+                    previous["source"] as String? ?? SpeakerAssignmentSource.model.rawValue,
+                    previous["confidence"] as Double? ?? 0,
+                    previous["score"] as Double?,
+                    previous["margin"] as Double?,
+                    previous["supporting_prototype_count"] as Int?,
+                    previous["matcher"] as String?,
+                    previous["evidence_json"] as String?,
+                    previous["operation_id"] as Int64?,
+                    change.targetUUID,
+                ]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE speaker_global_assignments SET
+                        speaker_uuid = ?,
+                        state = ?,
+                        source = ?,
+                        confidence = 0.90,
+                        score = NULL,
+                        margin = NULL,
+                        supporting_prototype_count = NULL,
+                        matcher = ?,
+                        evidence_json = ?,
+                        operation_id = NULL,
+                        reconciliation_run_id = ?,
+                        updated_at = ?
+                    WHERE local_cluster_id = ?
+                """,
+                arguments: [
+                    change.targetUUID,
+                    GlobalSpeakerAssignmentState.automatic.rawValue,
+                    SpeakerAssignmentSource.globalAutomatic.rawValue,
+                    "calibrated-constrained-v1",
+                    evidence,
+                    runID,
+                    now,
+                    change.clusterID,
+                ]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE utterances SET
+                        speaker_uuid = ?,
+                        speaker_assignment_source = ?
+                    WHERE local_speaker_cluster_id = ?
+                """,
+                arguments: [
+                    change.targetUUID,
+                    SpeakerAssignmentSource.globalAutomatic.rawValue,
+                    change.clusterID,
+                ]
+            )
+        }
+
+        let allTargets = Set(plan.changes.map(\.targetUUID))
+            .union(plan.newIdentityEmbeddings.keys)
+        for target in allTargets {
+            try db.execute(
+                sql: """
+                    UPDATE speakers SET
+                        identity_state = 'active',
+                        canonical_uuid = NULL,
+                        updated_at = ?
+                    WHERE uuid = ?
+                """,
+                arguments: [now, target]
+            )
+        }
+        var retiredCount = 0
+        for oldUUID in plan.affectedExistingUUIDs.subtracting(allTargets) {
+            let remaining = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM speaker_global_assignments
+                    WHERE speaker_uuid = ?
+                """,
+                arguments: [oldUUID]
+            ) ?? 0
+            guard remaining == 0 else { continue }
+            let destinations = Set(
+                plan.changes
+                    .filter { $0.previousUUID == oldUUID }
+                    .map(\.targetUUID)
+            )
+            try db.execute(
+                sql: """
+                    UPDATE speakers SET
+                        identity_state = ?,
+                        canonical_uuid = ?,
+                        updated_at = ?
+                    WHERE uuid = ?
+                """,
+                arguments: [
+                    destinations.count == 1 ? "alias" : "retired",
+                    destinations.count == 1 ? destinations.first : nil,
+                    now,
+                    oldUUID,
+                ]
+            )
+            retiredCount += 1
+        }
+
+        let refreshUUIDs = plan.affectedExistingUUIDs.union(allTargets)
+        for uuid in refreshUUIDs {
+            try GlobalSpeakerIdentityStore.refreshProfile(db, uuid: uuid)
+            try SpeakerVoicePrototypeStore.rebuild(
+                db,
+                speakerUUID: uuid,
+                policy: .qualityDurationWeighted
+            )
+        }
+        return GlobalSpeakerReconciliationApplyResult(
+            runID: runID,
+            changedClusterCount: plan.changes.count,
+            createdIdentityCount: plan.newIdentityEmbeddings.count,
+            retiredIdentityCount: retiredCount
         )
     }
 
@@ -963,7 +1880,9 @@ enum GlobalSpeakerLibraryReconciliation {
                 goldPurity: 0
             )
         }
-        let examples = try loadPairLabels(db).compactMap {
+        let examples = try loadReliablePairLabels(db, nodes: nodes)
+            .filter { $0.role == .development }
+            .compactMap {
             switch $0.verdict {
             case .samePerson:
                 return GlobalSpeakerCalibrationExample(
@@ -982,9 +1901,16 @@ enum GlobalSpeakerLibraryReconciliation {
             }
         }
         guard !examples.isEmpty else { return nil }
+        let model = GlobalSpeakerReconciler.fit(nodes: nodes, examples: examples)
+        let cohortEmbeddings = nodes.filter(\.reliableForIdentity).map(\.embedding)
         return GlobalSpeakerCalibrationBackend(
-            model: GlobalSpeakerReconciler.fit(nodes: nodes, examples: examples),
-            cohortEmbeddings: nodes.filter(\.reliableForIdentity).map(\.embedding)
+            model: model,
+            cohortEmbeddings: cohortEmbeddings,
+            mergeProbability: GlobalSpeakerReconciler.recommendedMergeProbability(
+                nodes: nodes,
+                examples: examples,
+                model: model
+            )
         )
     }
 
@@ -997,7 +1923,8 @@ enum GlobalSpeakerLibraryReconciliation {
         return try Row.fetchAll(
             db,
             sql: """
-                SELECT left_local_cluster_id, right_local_cluster_id, verdict, updated_at
+                SELECT left_local_cluster_id, right_local_cluster_id, verdict,
+                       dataset_role, label_source, source_action_id, updated_at
                 FROM speaker_pair_gold_labels
                 ORDER BY updated_at, left_local_cluster_id, right_local_cluster_id
             """
@@ -1011,9 +1938,87 @@ enum GlobalSpeakerLibraryReconciliation {
                 leftClusterId: left,
                 rightClusterId: right,
                 verdict: verdict,
+                role: SpeakerPairGoldRole(
+                    rawValue: row["dataset_role"] ?? ""
+                ) ?? .development,
+                source: SpeakerPairGoldSource(
+                    rawValue: row["label_source"] ?? ""
+                ) ?? .pairReview,
+                sourceActionID: row["source_action_id"],
                 updatedAt: row["updated_at"] ?? .distantPast
             )
         }
+    }
+
+    private static func loadReliablePairLabels(
+        _ db: Database,
+        nodes: [GlobalSpeakerBenchmarkNode]
+    ) throws -> [SpeakerPairGoldLabel] {
+        let reliableClusterIDs = Set(
+            nodes.compactMap { node -> Int64? in
+                guard node.reliableForIdentity,
+                      node.id.hasPrefix("cluster:") else { return nil }
+                return Int64(node.id.dropFirst("cluster:".count))
+            }
+        )
+        return try loadPairLabels(db).filter {
+            reliableClusterIDs.contains($0.leftClusterId)
+                && reliableClusterIDs.contains($0.rightClusterId)
+        }
+    }
+
+    private static func constraintsFor(
+        _ labels: [SpeakerPairGoldLabel]
+    ) -> [GlobalSpeakerReconciliationConstraint] {
+        labels.compactMap { label in
+            let left = "cluster:\(label.leftClusterId)"
+            let right = "cluster:\(label.rightClusterId)"
+            switch label.verdict {
+            case .samePerson:
+                return .init(left, right, kind: .mustLink)
+            case .differentPeople:
+                return .init(left, right, kind: .cannotLink)
+            case .mixedOrUnclear, .unsure:
+                return nil
+            }
+        }
+    }
+
+    private static func pairMetrics(
+        labels: [SpeakerPairGoldLabel],
+        assignments: [String: String]
+    ) -> SpeakerPairGoldMetrics {
+        var same = 0
+        var different = 0
+        var correct = 0
+        var falseMerges = 0
+        var falseSplits = 0
+        for label in labels {
+            guard let left = assignments["cluster:\(label.leftClusterId)"],
+                  let right = assignments["cluster:\(label.rightClusterId)"]
+            else { continue }
+            let predictedSame = left == right
+            switch label.verdict {
+            case .samePerson:
+                same += 1
+                if predictedSame { correct += 1 } else { falseSplits += 1 }
+            case .differentPeople:
+                different += 1
+                if predictedSame { falseMerges += 1 } else { correct += 1 }
+            case .mixedOrUnclear, .unsure:
+                break
+            }
+        }
+        let total = same + different
+        return SpeakerPairGoldMetrics(
+            evaluatedPairCount: total,
+            samePersonPairCount: same,
+            differentPeoplePairCount: different,
+            correctPairCount: correct,
+            accuracy: total > 0 ? Double(correct) / Double(total) : nil,
+            falseMergePairs: falseMerges,
+            falseSplitPairs: falseSplits
+        )
     }
 
     private static func decodeSpans(_ value: String?) -> [SpeakerIdentityTimeSpan] {

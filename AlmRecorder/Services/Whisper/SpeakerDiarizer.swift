@@ -357,7 +357,7 @@ class SpeakerDiarizer {
         guard !segments.isEmpty else { return [] }
         
         var validated: [SpeakerSegment] = []
-        var sortedSegments = segments.sorted { $0.startTime < $1.startTime }
+        let sortedSegments = segments.sorted { $0.startTime < $1.startTime }
         
         // Remove overlapping segments and merge very close segments from same speaker
         var currentSegment = sortedSegments[0]

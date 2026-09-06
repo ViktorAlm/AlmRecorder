@@ -21,8 +21,12 @@ enum VibeVoiceConfiguration {
     static let tokenizerRepositoryID = "Qwen/Qwen2.5-7B"
     static let tokenizerRevision = "d149729398750b98c0af14eb82c78cfe92750796" // gitleaks:allow -- public commit.
 
-    static let maximumSinglePassDuration: TimeInterval = 55 * 60
-    static let longRecordingTargetDuration: TimeInterval = 50 * 60
+    /// VibeVoice's generation cache grows with audio duration. A 55-minute 4-bit pass reached
+    /// 15.1 GB RSS on a 24 GB Mac during the 2026-07-27 compressor/swap watchdog panic, while the
+    /// 12-minute gold benchmark peaked at 9.64 GB. Bound each pass so long conversations cannot
+    /// silently turn a nominally 5.7 GB model into a system-sized allocation.
+    static let maximumSinglePassDuration: TimeInterval = 18 * 60
+    static let longRecordingTargetDuration: TimeInterval = 15 * 60
     static let helperSchemaVersion = 1
 
     static var modelsDirectory: URL {

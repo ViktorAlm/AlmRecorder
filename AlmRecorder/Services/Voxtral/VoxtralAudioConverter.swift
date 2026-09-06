@@ -121,13 +121,7 @@ class VoxtralAudioConverter {
     func getAudioDuration(filePath: String) -> TimeInterval? {
         let url = URL(fileURLWithPath: filePath)
         let asset = AVURLAsset(url: url)
-        let duration = asset.duration
-        
-        if duration.isValid && !duration.isIndefinite {
-            return CMTimeGetSeconds(duration)
-        }
-        
-        return nil
+        return getAssetDurationSync(asset)
     }
     
     /// Validate audio file for transcription

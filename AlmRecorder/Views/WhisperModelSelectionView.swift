@@ -85,7 +85,7 @@ struct WhisperModelSelectionView: View {
                     }
                 }
                 .pickerStyle(SegmentedPickerStyle())
-                .onChange(of: selectedFamily) { newFamily in
+                .onChange(of: selectedFamily) { _, newFamily in
                     // Reset version if switching families
                     if newFamily == .kblab {
                         selectedVersion = nil

@@ -2,7 +2,8 @@ import Foundation
 import SwiftUI
 
 struct TranscriptionItem: Identifiable, Codable {
-    let id = UUID()
+    // Codable must restore the original identity instead of generating a new one on every decode.
+    var id = UUID()
     let fileName: String
     let filePath: String
     let transcript: String

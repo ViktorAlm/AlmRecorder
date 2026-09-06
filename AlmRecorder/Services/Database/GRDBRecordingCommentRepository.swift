@@ -27,9 +27,16 @@ final class GRDBRecordingCommentRepository {
 
     private let db = GRDBDatabaseManager.shared
 
-    func list(recordingExternalId: String, status: RecordingComment.Status? = nil) throws -> [RecordingComment] {
+    func list(
+        recordingExternalId: String,
+        status: RecordingComment.Status? = nil,
+        authorizeRecording: ((Database, Int64) throws -> Bool)? = nil
+    ) throws -> [RecordingComment] {
         try db.read { db in
             guard let recordingId = try Self.recordingId(db, externalId: recordingExternalId) else {
+                throw RepositoryError.recordingNotFound
+            }
+            guard try authorizeRecording?(db, recordingId) ?? true else {
                 throw RepositoryError.recordingNotFound
             }
             var sql = "SELECT * FROM recording_comments WHERE recording_id = ?"
@@ -52,7 +59,8 @@ final class GRDBRecordingCommentRepository {
         sourceUtteranceId: Int64? = nil,
         createdBy: String,
         idempotencyKey: String? = nil,
-        authorize: (() -> Bool)? = nil
+        authorize: (() -> Bool)? = nil,
+        authorizeRecording: ((Database, Int64) throws -> Bool)? = nil
     ) throws -> RecordingComment {
         try Self.validate(body: body, anchorStart: anchorStart, anchorEnd: anchorEnd)
         return try db.write { db in
@@ -66,6 +74,9 @@ final class GRDBRecordingCommentRepository {
             }
             let recordingId: Int64 = recordingRow["id"]
             let duration: Double? = recordingRow["duration"]
+            guard try authorizeRecording?(db, recordingId) ?? true else {
+                throw RepositoryError.recordingNotFound
+            }
             if let duration,
                (anchorStart.map { $0 > duration + 0.5 } ?? false
                 || anchorEnd.map { $0 > duration + 0.5 } ?? false) {
@@ -143,7 +154,8 @@ final class GRDBRecordingCommentRepository {
         anchorStart: FieldPatch<TimeInterval?>,
         anchorEnd: FieldPatch<TimeInterval?>,
         ifUpdatedAt: Date? = nil,
-        authorize: (() -> Bool)? = nil
+        authorize: (() -> Bool)? = nil,
+        authorizeRecording: ((Database, Int64) throws -> Bool)? = nil
     ) throws -> RecordingComment {
         try db.write { db in
             guard authorize?() ?? true else { throw RepositoryError.authorizationRevoked }
@@ -152,6 +164,9 @@ final class GRDBRecordingCommentRepository {
                 sql: "SELECT * FROM recording_comments WHERE id = ?",
                 arguments: [id]
             ), var comment = Self.comment(row) else {
+                throw RepositoryError.commentNotFound
+            }
+            guard try authorizeRecording?(db, comment.recordingId) ?? true else {
                 throw RepositoryError.commentNotFound
             }
             if let ifUpdatedAt,
@@ -202,7 +217,8 @@ final class GRDBRecordingCommentRepository {
         id: String,
         status: RecordingComment.Status,
         ifUpdatedAt: Date? = nil,
-        authorize: (() -> Bool)? = nil
+        authorize: (() -> Bool)? = nil,
+        authorizeRecording: ((Database, Int64) throws -> Bool)? = nil
     ) throws -> RecordingComment {
         try db.write { db in
             guard authorize?() ?? true else { throw RepositoryError.authorizationRevoked }
@@ -211,6 +227,9 @@ final class GRDBRecordingCommentRepository {
                 sql: "SELECT * FROM recording_comments WHERE id = ?",
                 arguments: [id]
             ), var comment = Self.comment(row) else {
+                throw RepositoryError.commentNotFound
+            }
+            guard try authorizeRecording?(db, comment.recordingId) ?? true else {
                 throw RepositoryError.commentNotFound
             }
             if let ifUpdatedAt,

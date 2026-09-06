@@ -13,8 +13,12 @@ enum TranscriptionError: LocalizedError {
     case processFailed(String)
     /// A llama.cpp/whisper child died with the Metal out-of-memory signature (see
     /// `BackgroundGPUAdmission.isMetalOOM`). Background queues treat this as systemic — requeue
-    /// as `.pending` without burning retry budget — while `SystemMemoryGate` holds launches back.
+    /// as `.pending` without burning retry budget — while `SystemMemoryGate` briefly rate-limits
+    /// relaunches and rechecks live memory.
     case gpuOutOfMemory(String)
+    /// Starting or continuing the selected model would put the Mac at risk. Queue workers keep the
+    /// job pending and retry after memory pressure, compressor use, or swap debt recovers.
+    case resourcesUnavailable(String)
     case homebrewNotFound
     case installationFailed
     case serverNotRunning
@@ -45,6 +49,8 @@ enum TranscriptionError: LocalizedError {
             return "Transcription process failed: \(error)"
         case .gpuOutOfMemory(let detail):
             return "GPU ran out of memory: \(detail)"
+        case .resourcesUnavailable(let detail):
+            return "Waiting for safe memory: \(detail)"
         case .homebrewNotFound:
             return "Homebrew not found. Please install Homebrew first to install llama.cpp."
         case .installationFailed:
@@ -76,8 +82,8 @@ enum TranscriptionError: LocalizedError {
             return "Install Homebrew from https://brew.sh"
         case .serverNotRunning:
             return "Try switching to native transcription in Settings."
-        case .gpuOutOfMemory:
-            return "Close memory-heavy apps and try again — background AI work pauses and retries on its own."
+        case .gpuOutOfMemory, .resourcesUnavailable:
+            return "Close memory-heavy apps. Queued transcription will resume automatically when the memory safety check passes."
         default:
             return nil
         }

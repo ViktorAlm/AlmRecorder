@@ -22,11 +22,6 @@ struct SpeakerEmbedding {
     var dimension: Int { vector.count }
 }
 
-// Extension to make PyannoteSpeakerEmbedding conform to the protocol
-extension PyannoteSpeakerEmbedding: SpeakerEmbeddingService {
-    // Already implements the protocol methods correctly
-}
-
 // Extension to make FluidAudioEmbeddingService conform to the protocol
 extension FluidAudioEmbeddingService: SpeakerEmbeddingService {
     // Already implements the protocol methods correctly

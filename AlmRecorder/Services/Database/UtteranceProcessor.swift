@@ -207,12 +207,29 @@ class UtteranceProcessor {
                 }
             }
         }
-        // Evidence-graph mode always performs the graph pass: it intentionally creates local
-        // identities during enrollment and resolves them only after their immutable recording
-        // evidence has been persisted. Prototype consensus still follows the centroid-refresh flag.
-        if speakerConfiguration.identityMatcher == .evidenceGraph
+        // Once local evidence is durable, use the calibrated from-scratch reconciler by default.
+        // It may split contaminated automatic identities as well as join fragments, and it is
+        // allowed to write only after private development + held-out gold pass the safety gates.
+        // An enabled-but-unready reconciler deliberately does not fall back to the merge-only graph.
+        if SpeakerPipelineSettings.shared.continuousReconciliationEnabled {
+            do {
+                if let result = try GlobalSpeakerLibraryReconciliation.applyLatestIfSafe() {
+                    logger.info(
+                        "[UtteranceProcessor] Applied reversible calibrated global reconciliation"
+                            + " | changes=\(result.changedClusterCount)"
+                            + " created=\(result.createdIdentityCount)"
+                            + " retired=\(result.retiredIdentityCount)"
+                    )
+                }
+            } catch {
+                logger.warning(
+                    "[UtteranceProcessor] Calibrated global reconciliation skipped: \(error)"
+                )
+            }
+        } else if speakerConfiguration.identityMatcher == .evidenceGraph
             || (speakerConfiguration.identityMatcher == .prototypeConsensus
                 && speakerConfiguration.updateCentroidsAfterIngest) {
+            // Compatibility path for users who explicitly disable calibrated reconciliation.
             do {
                 let decisions = if speakerConfiguration.identityMatcher == .evidenceGraph {
                     try GlobalSpeakerConsolidator.consolidateEvidenceGraph(
@@ -257,12 +274,6 @@ class UtteranceProcessor {
 
         // Generate embeddings if requested
         if generateEmbeddings {
-            // Ensure default model is loaded
-            if !EmbeddingModelManager.shared.isModelLoaded {
-                logger.warning("[UtteranceProcessor] No embedding model loaded, downloading default...")
-                await EmbeddingModelManager.shared.ensureDefaultModel()
-            }
-
             if EmbeddingModelManager.shared.isModelLoaded {
                 if queueEmbeddings {
                     // Queue embeddings for background processing
@@ -279,7 +290,7 @@ class UtteranceProcessor {
                     )
                 }
             } else {
-                logger.error("[UtteranceProcessor] Failed to load embedding model - queuing for later processing")
+                logger.warning("[UtteranceProcessor] No embedding model installed - queuing for later processing")
                 await queueEmbeddingsForProcessing(
                     recordingId: recordingId,
                     utteranceIds: embeddingTargets.map(\.id),

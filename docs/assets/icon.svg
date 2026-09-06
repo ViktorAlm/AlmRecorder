@@ -1,21 +1,138 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="AlmRecorder">
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="120"
+  height="120"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">AlmRecorder app icon</title>
+  <desc id="description">
+    The approved sage and charcoal ribbon A with a horizontal desktop
+    microphone crossbar on a transparent field.
+  </desc>
+
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#38362F"/>
-      <stop offset="1" stop-color="#2E2D29"/>
-    </linearGradient>
+    <style>
+      @media (prefers-color-scheme: dark) {
+        .adaptive-foreground { fill: #FFFFFF; }
+      }
+    </style>
+
+    <mask id="app-icon-mesh-cutouts">
+      <path
+        d="
+          M537 461
+          V420
+          C537 386 557 365 585 365
+          C613 365 633 386 633 420
+          V461
+          Z
+        "
+        fill="white"
+      />
+      <rect x="549" y="392" width="72" height="6" rx="3" fill="black" />
+      <rect x="545" y="405" width="80" height="6" rx="3" fill="black" />
+      <rect x="543" y="418" width="84" height="6" rx="3" fill="black" />
+      <rect x="543" y="431" width="84" height="6" rx="3" fill="black" />
+      <rect x="545" y="444" width="80" height="6" rx="3" fill="black" />
+    </mask>
   </defs>
-  <rect width="120" height="120" rx="27" fill="url(#bg)"/>
-  <rect x="1" y="1" width="118" height="118" rx="26" fill="none" stroke="#F4EFE3" stroke-opacity=".10"/>
-  <g transform="translate(28,28)" fill="none" stroke="#9DAA85" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="24" y="7" width="16" height="25" rx="8"/>
-    <g stroke-width="3">
-      <line x1="28" y1="15" x2="36" y2="15"/>
-      <line x1="28" y1="19.5" x2="36" y2="19.5"/>
-      <line x1="28" y1="24" x2="36" y2="24"/>
+
+  <!--
+    The canonical mark is scaled as one unit so its 1.35:1 stance and every
+    reviewed join remain unchanged inside the macOS safe area.
+  -->
+  <g
+    transform="translate(186 271) scale(.88) translate(-132 -194)"
+    shape-rendering="geometricPrecision"
+  >
+    <path
+      transform="translate(0 194) scale(1 .87) translate(0 -194)"
+      d="
+        M132 795
+        H145
+        C174 795 194 747 213 699
+        C221 679 231 673 242 673
+        C253 673 261 682 267 688
+        C273 694 280 692 286 682
+        C294 670 302 638 310 622
+        L488 258
+        C500 220 523 194 555 194
+        H625
+        L580 296
+        L386 695
+        C374 720 355 785 330 813
+        C320 823 306 825 295 821
+        C280 816 271 799 262 783
+        L253 763
+        C249 753 246 741 240 741
+        C234 741 230 751 226 762
+        L216 785
+        C201 811 179 823 151 823
+        H132
+        Z
+      "
+      fill="#859477"
+    />
+
+    <g transform="translate(640 614) rotate(-90) scale(.55 .43) translate(-585 -544)">
+      <path
+        d="
+          M537 461
+          V420
+          C537 386 557 365 585 365
+          C613 365 633 386 633 420
+          V461
+          Z
+        "
+        class="adaptive-foreground"
+        fill="#252824"
+        mask="url(#app-icon-mesh-cutouts)"
+      />
+      <rect x="529" y="452" width="112" height="18" rx="9" fill="#859477" />
+      <path
+        d="
+          M538 464
+          H632
+          V559
+          C632 581 615 598 593 598
+          H577
+          C555 598 538 581 538 559
+          Z
+        "
+        class="adaptive-foreground"
+        fill="#252824"
+      />
+      <circle cx="585" cy="538" r="12" fill="#859477" />
+      <path
+        d="M520 523 V612 H650 V523"
+        fill="none"
+        stroke="#859477"
+        stroke-width="16"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+      <path d="M550 606 H620 L630 830 H540 Z" fill="#859477" />
     </g>
-    <line x1="30" y1="32" x2="13" y2="57"/>
-    <line x1="34" y1="32" x2="51" y2="57"/>
-    <line x1="20" y1="46" x2="44" y2="46"/>
+
+    <path
+      transform="translate(0 194) scale(1 .87) translate(0 -194)"
+      d="
+        M613 194
+        H625
+        C641 194 650 204 657 222
+        L865.4 761.3
+        C876 787 874 819 850 819
+        H794
+        C785 819 786 815 778.6 794.7
+        L580 296
+        L613 194
+        Z
+      "
+      class="adaptive-foreground"
+      fill="#252824"
+    />
   </g>
 </svg>

@@ -1,0 +1,22 @@
+AlmRecorder community build - first launch
+==========================================
+
+This edition is ad-hoc signed for bundle integrity, but it is not signed with an
+Apple Developer ID and has not been notarized by Apple. macOS will therefore ask
+you to make an explicit security exception the first time you launch it.
+
+Only continue if you downloaded the DMG from AlmRecorder's official GitHub
+Releases page and its SHA-256 digest matches the digest printed in that release.
+
+1. Drag AlmRecorder to Applications.
+2. In Applications, Control-click (or right-click) AlmRecorder, choose Open, and
+   confirm Open if macOS offers that choice.
+3. If macOS still blocks it, try opening AlmRecorder once, then open System
+   Settings > Privacy & Security. In the Security section choose Open Anyway and
+   authenticate. Apple makes this button available for about one hour after the
+   blocked launch attempt.
+
+No Terminal command or system-wide security change is required.
+
+Official releases: https://github.com/ViktorAlm/AlmRecorder/releases
+Apple's instructions: https://support.apple.com/guide/mac-help/mh40616/mac

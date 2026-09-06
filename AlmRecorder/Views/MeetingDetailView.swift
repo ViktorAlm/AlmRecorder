@@ -186,14 +186,14 @@ struct MeetingDetailView: View {
                     .frame(minHeight: 44)
                     .padding(4)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
-                    .onChange(of: agenda) { _ in saveNotes() }
+                    .onChange(of: agenda) { saveNotes() }
 
                 Text("NOTES").font(.caption2).foregroundColor(.secondary)
                 TextEditor(text: $notes)
                     .frame(minHeight: 80)
                     .padding(4)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2)))
-                    .onChange(of: notes) { _ in saveNotes() }
+                    .onChange(of: notes) { saveNotes() }
 
                 if let calNotes = meeting.notes, !calNotes.isEmpty {
                     DisclosureGroup("Calendar description") {

@@ -18,10 +18,6 @@ class WhisperModelManager: NSObject, ObservableObject {
     // MARK: - Private Properties
     
     private let modelsDirectory: URL
-    private var downloadTask: URLSessionDownloadTask?
-    private var urlSession: URLSession!
-    private var downloadContinuation: CheckedContinuation<Void, Error>?
-    private var currentDownloadVariant: WhisperModelVariant?
     private var refreshTimer: Timer?
     
     // MARK: - Singleton
@@ -33,14 +29,6 @@ class WhisperModelManager: NSObject, ObservableObject {
     override private init() {
         self.modelsDirectory = WhisperConfiguration.modelsDirectory
         super.init()
-        
-        // Configure URLSession (using default, not background, for CLI compatibility)
-        let config = URLSessionConfiguration.default
-        config.httpMaximumConnectionsPerHost = 5
-        config.timeoutIntervalForRequest = 300 // 5 minutes for initial response
-        config.timeoutIntervalForResource = 7200 // 2 hours for large models
-        config.allowsCellularAccess = true
-        self.urlSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         
         createModelsDirectoryIfNeeded()
         checkDownloadedModels()
@@ -83,10 +71,13 @@ class WhisperModelManager: NSObject, ObservableObject {
             return false
         }
         
-        // Validate file size (must be at least 1MB)
+        // Catalog sizes are approximate, but a tiny/truncated GGUF must never be treated as ready.
         if let attributes = try? FileManager.default.attributesOfItem(atPath: modelPath.path),
            let fileSize = attributes[.size] as? Int64,
-           fileSize > 1_000_000 {
+           UnifiedDownloadQueue.isAcceptableFileSize(
+               fileSize,
+               declaredSize: variant.estimatedSize
+           ) {
             return true
         }
         
@@ -320,8 +311,13 @@ class WhisperModelManager: NSObject, ObservableObject {
     
     /// Cancel current download
     func cancelDownload() {
-        downloadTask?.cancel()
-        downloadTask = nil
+        let queue = UnifiedDownloadQueue.shared
+        let activeWhisperTaskIDs = queue.downloadTasks.compactMap { task -> UUID? in
+            guard task.modelType == "whisper",
+                  task.state == .pending || task.state == .downloading else { return nil }
+            return task.id
+        }
+        activeWhisperTaskIDs.forEach(queue.cancelDownload)
         
         Task { @MainActor in
             isDownloading = false
@@ -381,8 +377,7 @@ class WhisperModelManager: NSObject, ObservableObject {
         
         // Check all possible model variants
         for variant in availableModels {
-            let path = modelPath(for: variant)
-            if FileManager.default.fileExists(atPath: path.path) {
+            if isModelDownloaded(variant) {
                 downloadedModels.insert(variant)
             }
         }
@@ -453,114 +448,5 @@ class WhisperModelManager: NSObject, ObservableObject {
                 }
             }
         }
-    }
-}
-
-// MARK: - URLSessionDownloadDelegate
-
-extension WhisperModelManager: URLSessionDownloadDelegate, URLSessionTaskDelegate {
-    
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        logger.debug("[WhisperModelManager] Redirect from: \(task.originalRequest?.url?.absoluteString ?? "unknown")")
-        logger.debug("[WhisperModelManager] Redirect to: \(request.url?.absoluteString ?? "unknown")")
-        logger.debug("[WhisperModelManager] Response code: \(response.statusCode)")
-        
-        // Allow the redirect
-        completionHandler(request)
-    }
-    
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        
-        logger.debug("[WhisperModelManager] Download progress: \(totalBytesWritten) / \(totalBytesExpectedToWrite) = \(String(format: "%.2f%%", progress * 100))")
-        logger.debug("[WhisperModelManager] Bytes written this call: \(bytesWritten)")
-        
-        Task { @MainActor in
-            self.downloadProgress = progress
-            logger.debug("[WhisperModelManager] UI progress updated to: \(self.downloadProgress)")
-        }
-    }
-    
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        logger.info("[WhisperModelManager] Download finished to location: \(location.path)")
-        
-        guard let variant = currentDownloadVariant else {
-            logger.error("[WhisperModelManager] Error: No current variant set")
-            return
-        }
-        
-        // Check file size at download location
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: location.path) {
-            let fileSize = attributes[.size] as? Int64 ?? 0
-            logger.info("[WhisperModelManager] Downloaded file size: \(fileSize) bytes (\(fileSize / 1_000_000) MB)")
-            
-            // Move file to final location
-            let destinationPath = self.modelPath(for: variant)
-            
-            do {
-                // Validate size
-                guard fileSize > 1_000_000 else { // 1MB minimum
-                    logger.error("[WhisperModelManager] Downloaded file too small: \(fileSize) bytes")
-                    downloadContinuation?.resume(throwing: TranscriptionError.downloadFailed)
-                    downloadContinuation = nil
-                    return
-                }
-                
-                // Create directory if needed
-                let destDir = destinationPath.deletingLastPathComponent()
-                try? FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
-                
-                // Remove existing file if it exists
-                try? FileManager.default.removeItem(at: destinationPath)
-                
-                // Move downloaded file
-                try FileManager.default.moveItem(at: location, to: destinationPath)
-                
-                logger.info("[WhisperModelManager] Model downloaded successfully: \(variant.displayName) (\(fileSize / 1_000_000) MB)")
-                
-                Task { @MainActor in
-                    self.downloadedModels.insert(variant)
-                    self.checkDownloadedModels()
-                    self.isDownloading = false
-                    self.downloadProgress = 0.0
-                }
-                
-                // Success - resume continuation
-                downloadContinuation?.resume()
-                downloadContinuation = nil
-                
-            } catch {
-                logger.error("[WhisperModelManager] Failed to move downloaded file: \(error)")
-                downloadContinuation?.resume(throwing: TranscriptionError.downloadFailed)
-                downloadContinuation = nil
-            }
-        } else {
-            logger.error("[WhisperModelManager] Could not get file attributes")
-            downloadContinuation?.resume(throwing: TranscriptionError.downloadFailed)
-            downloadContinuation = nil
-        }
-    }
-    
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error {
-            logger.error("[WhisperModelManager] Download error: \(error)")
-            logger.error("[WhisperModelManager] Error code: \((error as NSError).code)")
-            logger.error("[WhisperModelManager] Error domain: \((error as NSError).domain)")
-            
-            Task { @MainActor in
-                self.isDownloading = false
-                self.downloadProgress = 0.0
-            }
-            
-            // Resume continuation with error
-            downloadContinuation?.resume(throwing: TranscriptionError.downloadFailed)
-            downloadContinuation = nil
-        } else {
-            logger.info("[WhisperModelManager] Download task completed successfully")
-            // Success case is handled in didFinishDownloadingTo
-        }
-        
-        // Clean up
-        currentDownloadVariant = nil
     }
 }

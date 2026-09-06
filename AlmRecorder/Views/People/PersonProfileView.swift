@@ -140,18 +140,21 @@ struct PersonProfileView: View {
                     .frame(width: 64, height: 64)
                     .overlay(Text(speaker.initials).font(.title).foregroundColor(.white).fontWeight(.semibold))
 
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     TextField("Name", text: $editedName)
                         .font(.title2.weight(.bold))
                         .textFieldStyle(.plain)
+                        .lineLimit(1)
                         .onSubmit { saveProfile() }
-                        .onChange(of: editedName) { _ in scheduleNameSave() }
+                        .onChange(of: editedName) { scheduleNameSave() }
 
                     HStack(spacing: 8) {
                         if let email = linkedEmail, !email.isEmpty {
                             Label(email, systemImage: "envelope.fill")
                                 .font(.callout)
                                 .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                             Menu {
                                 Button("Change email…") { emailInput = email; showLinkEmail = true }
                                 Button("Unlink", role: .destructive) { unlinkEmail() }
@@ -170,16 +173,11 @@ struct PersonProfileView: View {
                             .buttonStyle(.link)
                         }
                     }
-
-                    HStack(spacing: 16) {
-                        Label("\(speaker.utteranceCount) utterances", systemImage: "text.bubble")
-                        Label(formatDuration(speaker.totalDuration), systemImage: "clock")
-                        Label("Last seen \(speaker.lastSeenFormatted)", systemImage: "calendar")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 }
+                .layoutPriority(1)
+
                 Spacer()
+
                 if isOwner {
                     Label("You", systemImage: "person.crop.circle.badge.checkmark")
                         .font(.caption.weight(.semibold))
@@ -197,17 +195,17 @@ struct PersonProfileView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .fixedSize()
                     .help("Use this voice as your identity; this does not merge speakers")
                 }
-                Button {
-                    showSplit = true
-                } label: {
-                    Label("Split", systemImage: "person.2.badge.gearshape")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Automatically split a mixed speaker profile in bulk")
+
                 Menu {
+                    Button {
+                        showSplit = true
+                    } label: {
+                        Label("Split mixed voice profile…", systemImage: "person.2.badge.gearshape")
+                    }
+                    Divider()
                     Menu {
                         let targets = moveTargets
                         if targets.isEmpty {
@@ -241,6 +239,20 @@ struct PersonProfileView: View {
                 .help("More actions")
             }
 
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) {
+                    profileMetric("\(speaker.utteranceCount) utterances", icon: "text.bubble")
+                    profileMetric(formatDuration(speaker.totalDuration), icon: "clock")
+                    profileMetric("Last seen \(speaker.lastSeenFormatted)", icon: "calendar")
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    profileMetric("\(speaker.utteranceCount) utterances", icon: "text.bubble")
+                    profileMetric(formatDuration(speaker.totalDuration), icon: "clock")
+                    profileMetric("Last seen \(speaker.lastSeenFormatted)", icon: "calendar")
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("Notes").font(.caption).foregroundColor(.secondary)
                 TextEditor(text: $notes)
@@ -253,6 +265,13 @@ struct PersonProfileView: View {
             }
         }
         .cardStyle()
+    }
+
+    private func profileMetric(_ text: String, icon: String) -> some View {
+        Label(text, systemImage: icon)
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     // MARK: - About (AI)
@@ -473,7 +492,7 @@ struct PersonProfileView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            .onChange(of: searchMode) { _ in displayLimit = 20 }
+            .onChange(of: searchMode) { displayLimit = 20 }
 
             if searchMode != .review {
                 HStack {
@@ -481,7 +500,7 @@ struct PersonProfileView: View {
                     TextField(searchMode == .words ? "Search their exact words…" : "Describe what you're looking for…", text: $quoteSearch)
                         .textFieldStyle(.plain)
                         .onSubmit { if searchMode == .meaning { runSemanticSearch() } }
-                        .onChange(of: quoteSearch) { _ in if searchMode == .words { displayLimit = 20 } }
+                        .onChange(of: quoteSearch) { if searchMode == .words { displayLimit = 20 } }
                     if isSearchingSemantic { ProgressView().controlSize(.small) }
                     if !quoteSearch.isEmpty {
                         Button { quoteSearch = ""; semanticItems = []; semanticError = nil; displayLimit = 20 } label: {

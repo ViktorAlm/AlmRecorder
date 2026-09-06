@@ -104,6 +104,9 @@ struct SpeakerEvaluationDatasetRecording {
     let recording: Recording
     let recordingKey: String
     let reference: [SpeakerEvaluationSegment]
+    /// Unscored inspection calls still provide ASR timestamps to the diarizer, but must never
+    /// become reference labels or affect gold metrics.
+    var isGold: Bool = true
 }
 
 struct SpeakerEvaluationDataset: @unchecked Sendable {
@@ -132,6 +135,12 @@ struct LocalSpeakerEvaluationDataProvider: SpeakerEvaluationDataProviding,
     func loadDataset() throws -> SpeakerEvaluationDataset {
         try GRDBDatabaseManager.shared.read { db in
             try SpeakerEvaluationWorkspace.loadDataset(db)
+        }
+    }
+
+    func loadDatasetIncludingLatest(limit: Int = 5) throws -> SpeakerEvaluationDataset {
+        try GRDBDatabaseManager.shared.read { db in
+            try SpeakerEvaluationWorkspace.loadDatasetIncludingLatest(db, limit: limit)
         }
     }
 
@@ -473,6 +482,112 @@ enum SpeakerEvaluationWorkspace {
             goldRevision: revisionParts.sorted().joined(separator: "|")
                 + "|pairs:\(pairRevision)"
         )
+    }
+
+    /// Adds the newest accessible recordings as unscored inspection calls. Gold calls remain the
+    /// only source of labels and metrics, while developers can see what every global matcher would
+    /// do to the calls they are actively working on.
+    static func loadDatasetIncludingLatest(
+        _ db: Database,
+        limit: Int = 5
+    ) throws -> SpeakerEvaluationDataset {
+        let gold = try loadDataset(db)
+        guard limit > 0 else { return gold }
+
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT r.*
+                FROM recordings r
+                WHERE r.file_path IS NOT NULL
+                  AND TRIM(r.file_path) != ''
+                ORDER BY r.created_at DESC, r.id DESC
+                LIMIT ?
+            """,
+            arguments: [max(50, limit * 10)]
+        )
+        var latest: [SpeakerEvaluationDatasetRecording] = []
+        latest.reserveCapacity(limit)
+        for row in rows {
+            guard latest.count < limit,
+                  let recording = Recording(row: row),
+                  let recordingId = recording.id,
+                  let path = recording.filePath,
+                  FileManager.default.fileExists(atPath: path) else {
+                continue
+            }
+            let recordingKey = "recording:\(recordingId)"
+            let transcriptRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT start_time, end_time, text
+                    FROM utterances
+                    WHERE recording_id = ? AND COALESCE(is_hidden, 0) = 0
+                    ORDER BY start_time, utterance_index, id
+                """,
+                arguments: [recordingId]
+            )
+            let timingContext = transcriptRows.map { transcriptRow in
+                let start: Double = transcriptRow["start_time"] ?? 0
+                let end: Double = transcriptRow["end_time"] ?? start
+                let text: String? = transcriptRow["text"]
+                return SpeakerEvaluationSegment(
+                    recordingKey: recordingKey,
+                    speakerKey: nil,
+                    startTime: max(0, start),
+                    endTime: max(start, end),
+                    text: text,
+                    timingIsGold: false
+                )
+            }
+            latest.append(SpeakerEvaluationDatasetRecording(
+                recording: recording,
+                recordingKey: recordingKey,
+                reference: timingContext,
+                isGold: false
+            ))
+        }
+
+        let latestIDs = Set(latest.compactMap(\.recording.id))
+        let retainedGold = gold.recordings.filter {
+            guard let id = $0.recording.id else { return true }
+            return !latestIDs.contains(id)
+        }
+        // The latest calls run last, after the gold calls have established reusable voice evidence.
+        // If a latest call is itself gold, retain its gold-labeled version rather than the unscored
+        // duplicate.
+        let goldByID: [Int64: SpeakerEvaluationDatasetRecording] = Dictionary(
+            uniqueKeysWithValues: gold.recordings.compactMap {
+                guard let id = $0.recording.id else { return nil }
+                return (id, $0) as (Int64, SpeakerEvaluationDatasetRecording)
+            }
+        )
+        let inspectedLatest = latest.map {
+            guard let id = $0.recording.id else { return $0 }
+            return goldByID[id] ?? $0
+        }
+        return SpeakerEvaluationDataset(
+            recordings: retainedGold + inspectedLatest,
+            goldRevision: gold.goldRevision
+        )
+    }
+
+    static func loadLatestRecordings(
+        _ db: Database,
+        limit: Int = 5
+    ) throws -> [Recording] {
+        guard limit > 0 else { return [] }
+        return try Row.fetchAll(
+            db,
+            sql: """
+                SELECT r.*
+                FROM recordings r
+                ORDER BY r.created_at DESC, r.id DESC
+                LIMIT ?
+            """,
+            arguments: [limit]
+        )
+        .compactMap(Recording.init(row:))
     }
 
     static func recommendationScore(

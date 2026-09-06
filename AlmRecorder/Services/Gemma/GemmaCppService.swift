@@ -1,6 +1,13 @@
 import Foundation
 import Combine
 
+#if false
+// DEFERRED: Gemma audio transcription.
+//
+// This historical implementation is intentionally excluded from the build. Gemma is currently
+// text-only in AlmRecorder. Re-enable only behind a reviewed feature flag plus private audio
+// benchmarks; never expose this service through a transcription picker or queue snapshot.
+
 /// Orchestrates Gemma 4 audio transcription. Mirrors VoxtralCppService but with Gemma's engine
 /// parameters (`--jinja`, non-greedy sampler), a <=30s VAD chunking config, and Gemma stop-token
 /// cleanup. Reuses the generic VoxtralAudioConverter, VADAudioSplitter, and LlamaCppProcessRunner.
@@ -335,3 +342,4 @@ class GemmaCppService: ObservableObject {
         logger.debug("[Gemma] Status: \(status) (\(Int(progress * 100))%)")
     }
 }
+#endif

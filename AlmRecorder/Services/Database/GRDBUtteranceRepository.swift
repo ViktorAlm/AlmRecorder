@@ -779,7 +779,7 @@ class GRDBUtteranceRepository {
                 return utterance
             }
             
-            logger.info("[GRDBUtteranceRepository] Text search for '\(query)' found \(rows.count) rows, parsed \(results.count) utterances")
+            logger.info("[GRDBUtteranceRepository] Text search | queryChars=\(query.count) rows=\(rows.count) parsed=\(results.count)")
             return results
         }
     }

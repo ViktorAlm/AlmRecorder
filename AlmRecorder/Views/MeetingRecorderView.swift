@@ -1,6 +1,5 @@
 import SwiftUI
 import AVFoundation
-import CoreGraphics
 
 /// The Record tab — full recording page (old design language) driven by the dual-channel
 /// `MeetingRecorder`: rich status card with live VU meter, big animated record button, waveform,
@@ -9,7 +8,7 @@ import CoreGraphics
 struct MeetingRecorderView: View {
     @ObservedObject private var recorder = MeetingRecorder.shared
     @ObservedObject private var globalSettings = GlobalTranscriptionSettings.shared
-    @State private var screenGranted = CGPreflightScreenCaptureAccess()
+    @ObservedObject private var permissions = PermissionsManager.shared
     @State private var showSettings = false
     @State private var resultNote: String?
     @Environment(\.colorScheme) private var colorScheme
@@ -33,9 +32,6 @@ struct MeetingRecorderView: View {
             idealHeight: 760,
             maxHeight: .infinity
         )
-        .onAppear {
-            screenGranted = CGPreflightScreenCaptureAccess()
-        }
     }
 
     // MARK: - Left: recording controls
@@ -248,18 +244,24 @@ struct MeetingRecorderView: View {
             infoRow(icon: "tray.full.fill", color: .mint, title: "Then transcribed",
                     detail: "Both tracks queue automatically and appear in your Library.")
 
-            if !screenGranted {
+            if permissions.screenRecording == .denied {
                 Divider().padding(.vertical, 4)
                 VStack(alignment: .leading, spacing: 8) {
                     Label("System audio needs Screen Recording permission.", systemImage: "lock.shield")
                         .font(.caption).foregroundColor(.orange)
-                    Button(action: requestScreenAccess) {
-                        Label("Enable system audio…", systemImage: "lock.open")
+                    Button(action: openScreenRecordingSettings) {
+                        Label("Open Screen Recording settings…", systemImage: "lock.open")
                     }
                     .buttonStyle(.bordered)
                     Text("Grant it, then relaunch once. (Mic-only recording still works without it.)")
                         .font(.caption2).foregroundColor(.secondary)
                 }
+            } else if permissions.screenRecording == .notDetermined {
+                Divider().padding(.vertical, 4)
+                Label("System audio access is checked only when recording starts.",
+                      systemImage: "hand.raised")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -279,10 +281,11 @@ struct MeetingRecorderView: View {
     // MARK: - Source badges
 
     private enum SourceState {
-        case ready, recording, needsPermission, off
+        case ready, checkedOnStart, recording, needsPermission, off
         var text: String {
             switch self {
             case .ready: return "Ready"
+            case .checkedOnStart: return "Checked on start"
             case .recording: return "Recording"
             case .needsPermission: return "Needs permission"
             case .off: return "Off"
@@ -290,7 +293,7 @@ struct MeetingRecorderView: View {
         }
         var color: Color {
             switch self {
-            case .ready: return .secondary
+            case .ready, .checkedOnStart: return .secondary
             case .recording: return .green
             case .needsPermission: return .orange
             case .off: return .secondary
@@ -305,7 +308,11 @@ struct MeetingRecorderView: View {
 
     private var systemState: SourceState {
         if recorder.isRecording { return recorder.systemActive ? .recording : .off }
-        return screenGranted ? .ready : .needsPermission
+        switch permissions.screenRecording {
+        case .granted: return .ready
+        case .denied: return .needsPermission
+        case .notDetermined: return .checkedOnStart
+        }
     }
 
     private var hasMicrophoneAccess: Bool {
@@ -315,7 +322,7 @@ struct MeetingRecorderView: View {
     private var statusTitle: String {
         if recorder.isRecording { return "Recording" }
         if !hasMicrophoneAccess { return "Microphone access needed" }
-        if !screenGranted { return "Ready · microphone only" }
+        if permissions.screenRecording == .denied { return "Ready · microphone only" }
         return "Ready to record"
     }
 
@@ -323,15 +330,18 @@ struct MeetingRecorderView: View {
         if !hasMicrophoneAccess {
             return "Start recording to grant microphone access."
         }
-        if !screenGranted {
+        if permissions.screenRecording == .denied {
             return "Enable system audio to capture remote participants as a separate track."
+        }
+        if permissions.screenRecording == .notDetermined {
+            return "System audio access will be checked when recording starts."
         }
         return "Microphone and system audio are available."
     }
 
     private var statusColor: Color {
         if recorder.isRecording { return .red }
-        if !hasMicrophoneAccess || !screenGranted { return .orange }
+        if !hasMicrophoneAccess || permissions.screenRecording == .denied { return .orange }
         return .green
     }
 
@@ -372,9 +382,7 @@ struct MeetingRecorderView: View {
         }
     }
 
-    private func requestScreenAccess() {
-        _ = CGRequestScreenCaptureAccess()
-        screenGranted = CGPreflightScreenCaptureAccess()
+    private func openScreenRecordingSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }

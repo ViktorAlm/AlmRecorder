@@ -5,6 +5,27 @@ struct VibeVoiceOutput {
     let language: String?
     let peakMemoryGB: Double?
     let processingSeconds: Double?
+    let generationTokens: Int?
+    let outputRecovered: Bool
+    let outputLikelyTruncated: Bool
+
+    init(
+        chunks: [TranscriptionChunk],
+        language: String?,
+        peakMemoryGB: Double?,
+        processingSeconds: Double?,
+        generationTokens: Int? = nil,
+        outputRecovered: Bool = false,
+        outputLikelyTruncated: Bool = false
+    ) {
+        self.chunks = chunks
+        self.language = language
+        self.peakMemoryGB = peakMemoryGB
+        self.processingSeconds = processingSeconds
+        self.generationTokens = generationTokens
+        self.outputRecovered = outputRecovered
+        self.outputLikelyTruncated = outputLikelyTruncated
+    }
 }
 
 enum VibeVoiceOutputParser {
@@ -14,6 +35,9 @@ enum VibeVoiceOutputParser {
         let language: String?
         let peakMemoryGB: Double?
         let processingSeconds: Double?
+        let generationTokens: Int?
+        let outputRecovered: Bool?
+        let outputLikelyTruncated: Bool?
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
@@ -21,6 +45,9 @@ enum VibeVoiceOutputParser {
             case language
             case peakMemoryGB = "peak_memory_gb"
             case processingSeconds = "processing_seconds"
+            case generationTokens = "generation_tokens"
+            case outputRecovered = "output_recovered"
+            case outputLikelyTruncated = "output_likely_truncated"
         }
     }
 
@@ -106,7 +133,10 @@ enum VibeVoiceOutputParser {
                 segments: segments,
                 language: nil,
                 peakMemoryGB: nil,
-                processingSeconds: nil
+                processingSeconds: nil,
+                generationTokens: nil,
+                outputRecovered: nil,
+                outputLikelyTruncated: nil
             )
         } else {
             throw TranscriptionError.invalidResponse
@@ -154,7 +184,10 @@ enum VibeVoiceOutputParser {
             chunks: chunks,
             language: envelope.language,
             peakMemoryGB: envelope.peakMemoryGB,
-            processingSeconds: envelope.processingSeconds
+            processingSeconds: envelope.processingSeconds,
+            generationTokens: envelope.generationTokens,
+            outputRecovered: envelope.outputRecovered ?? false,
+            outputLikelyTruncated: envelope.outputLikelyTruncated ?? false
         )
     }
 

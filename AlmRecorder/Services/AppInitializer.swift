@@ -24,7 +24,8 @@ class AppInitializer {
         // Migrate model preferences to variant system
         await migrateModelPreferences()
         
-        // Ensure default embedding model is downloaded
+        // Discover already-installed models. First-run downloads belong to the setup wizard, where
+        // their size and purpose are visible and the user explicitly starts them.
         await ensureEmbeddingModel()
         
         // Ensure default Whisper model is downloaded
@@ -59,13 +60,10 @@ class AppInitializer {
         
         let modelManager = EmbeddingModelManager.shared
         
-        // This will auto-download the default Qwen 0.6B Q4 model if needed
-        await modelManager.ensureDefaultModel()
-        
         if modelManager.isModelLoaded {
             print("[AppInitializer] Embedding model ready: \(modelManager.currentModel)")
         } else {
-            print("[AppInitializer] Warning: No embedding model loaded")
+            print("[AppInitializer] No embedding model installed; waiting for setup/user action")
         }
     }
     
@@ -100,14 +98,7 @@ class AppInitializer {
         // Check if we have the selected model downloaded
         if let selectedVariant = modelSettings.selectedWhisperVariant {
             if !whisperManager.isModelDownloaded(selectedVariant) {
-                print("[AppInitializer] Selected model not found, downloading: \(selectedVariant.displayName)")
-                do {
-                    try await whisperManager.downloadModel(selectedVariant)
-                    print("[AppInitializer] Selected model downloaded: \(selectedVariant.displayName)")
-                } catch {
-                    print("[AppInitializer] Failed to download selected model: \(error)")
-                    print("[AppInitializer] User will need to download manually or select another model")
-                }
+                print("[AppInitializer] Selected Whisper model is not installed; waiting for setup/user action: \(selectedVariant.displayName)")
             } else {
                 print("[AppInitializer] Selected model ready: \(selectedVariant.displayName)")
             }
@@ -160,9 +151,8 @@ class AppInitializer {
         }
     }
 
-    /// Start the background transcript-cleanup processor (hallucination detection + Gemma audio
-    /// verification). Resumes interrupted jobs; backfill discovery only runs while the
-    /// auto-cleanup toggle is on (checked inside performMaintenance).
+    /// Start the background transcript-cleanup processor (hallucination detection + review
+    /// routing). Resumes interrupted jobs; backfill discovery only runs while enabled.
     private func startBackgroundCleanupProcessor() async {
         let queue = TranscriptCleanupQueueManager.shared
         if queue.hasActiveJobs {

@@ -6,7 +6,8 @@ import Foundation
 ///
 /// Tier discipline: `junk` (auto-hide) requires a *hard* text reason — boilerplate, empty/symbols,
 /// or a runaway repetition loop. Probabilistic signals (token prob, char rate, cross-repetition,
-/// embedding duplicates) can only ever escalate to `verify`, where Gemma listens to the audio.
+/// embedding duplicates) can only ever escalate to `verify`, which means human review while audio
+/// model verification is deferred.
 enum TranscriptSuspicionScorer {
 
     struct Input {
@@ -31,7 +32,7 @@ enum TranscriptSuspicionScorer {
 
     enum Reason: String, Codable {
         case boilerplate, emptyOrSymbols, repetitionLoop, silenceFiller  // hard — force score 1.0, allow junk tier
-        case repetitionSoft, crossRepetition, lowTokenProb, veryLowTokenProb,
+        case embeddedBoilerplate, repetitionSoft, crossRepetition, lowTokenProb, veryLowTokenProb,
              highCharRate, longSparse, embeddingDuplicate, scriptOutlier,
              knownHallucination, voiceMismatch                            // soft — additive, cap at verify tier
     }
@@ -59,6 +60,7 @@ enum TranscriptSuspicionScorer {
         static let softDistinctRatio = 0.5
         static let softDistinctMinWords = 10
         static let repetitionSoftScore = 0.45
+        static let embeddedBoilerplateScore = 0.55
 
         static let crossRepetitionMinWords = 3
         static let crossRepetitionScore = 0.5
@@ -151,12 +153,15 @@ enum TranscriptSuspicionScorer {
             } else {
                 if isBoilerplate(lower, wordCount: words.count) {
                     reasons.append(.boilerplate)
+                } else if containsEmbeddedBoilerplate(lower, wordCount: words.count) {
+                    reasons.append(.embeddedBoilerplate)
+                    score += Thresholds.embeddedBoilerplateScore
                 }
                 if isSilenceFiller(lower, words: words) {
                     reasons.append(.silenceFiller)
                 }
                 let nGramRun = maxConsecutiveNGramRun(words)
-                if TranscriptHallucinationFilter.isRunawayRepetition(lower) || nGramRun >= Thresholds.hardNGramRun {
+                if TranscriptHallucinationFilter.isRunawayRepetition(lower) {
                     reasons.append(.repetitionLoop)
                 } else if nGramRun >= Thresholds.softNGramRunMin
                             || (words.count >= Thresholds.softDistinctMinWords
@@ -317,13 +322,32 @@ enum TranscriptSuspicionScorer {
     }
 
     private static func isBoilerplate(_ lower: String, wordCount: Int) -> Bool {
-        if TranscriptHallucinationFilter.hasBoilerplateMarker(lower) { return true }
-        if extraBoilerplatePhrases.contains(where: lower.contains) { return true }
+        if TranscriptHallucinationFilter.isStandaloneBoilerplate(lower) { return true }
+        if extraBoilerplatePhrases.contains(where: { phrase in
+            lower.contains(phrase)
+                && (wordCount <= TranscriptHallucinationFilter.hardBoilerplateMaxWords
+                    || hasRepeatedPhrase(phrase, in: lower))
+        }) { return true }
         // Credit lines pair "copyright" with an agency; either alone appears in real speech.
-        if lower.contains("copyright"), lower.contains("sdi media") { return true }
+        if wordCount <= TranscriptHallucinationFilter.hardBoilerplateMaxWords,
+           lower.contains("copyright"), lower.contains("sdi media") { return true }
         // A bare URL utterance is a credit; a long sentence merely mentioning one is real speech.
         if lower.contains("www."), wordCount <= Thresholds.wwwMaxWords { return true }
         return false
+    }
+
+    private static func hasRepeatedPhrase(_ phrase: String, in text: String) -> Bool {
+        guard let first = text.range(of: phrase) else { return false }
+        return text.range(of: phrase, range: first.upperBound..<text.endIndex) != nil
+    }
+
+    private static func containsEmbeddedBoilerplate(_ lower: String, wordCount: Int) -> Bool {
+        guard wordCount > TranscriptHallucinationFilter.hardBoilerplateMaxWords else {
+            return false
+        }
+        return TranscriptHallucinationFilter.hasBoilerplateMarker(lower)
+            || extraBoilerplatePhrases.contains(where: lower.contains)
+            || (lower.contains("copyright") && lower.contains("sdi media"))
     }
 
     /// Junk if nothing alphanumeric remains after stripping known noise markers ("[musik]", "♪",

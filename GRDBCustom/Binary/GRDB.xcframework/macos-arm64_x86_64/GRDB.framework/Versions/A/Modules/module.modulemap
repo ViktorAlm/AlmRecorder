@@ -1,4 +1,4 @@
-module CSQLite {
+framework module CSQLite {
     header "sqlite3.h"
     export *
 }

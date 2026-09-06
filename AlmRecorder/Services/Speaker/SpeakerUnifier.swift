@@ -1,6 +1,6 @@
 import Foundation
 
-struct SpeakerIdentityTimeSpan: Equatable, Sendable {
+struct SpeakerIdentityTimeSpan: Codable, Equatable, Sendable {
     let start: TimeInterval
     let end: TimeInterval
 

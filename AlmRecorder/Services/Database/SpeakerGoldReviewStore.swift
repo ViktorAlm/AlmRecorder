@@ -18,6 +18,37 @@ enum SpeakerGoldReviewError: LocalizedError {
 /// Durable conversation-level speaker-gold verdicts. The speaker wizard only reviews detected
 /// clusters; this store is used after the user checks every visible line in the transcript.
 enum SpeakerGoldReviewStore {
+    /// Rebuilds derived pair constraints from conversations that were already confirmed before
+    /// edit-to-gold capture existed. This is intentionally idempotent: each conversation owns one
+    /// action ID, and explicit pair-review labels are never overwritten.
+    static func backfillDerivedGold(_ db: Database) throws {
+        guard try db.tableExists("speaker_pair_gold_labels"),
+              try db.tableExists("speaker_global_assignments"),
+              try db.tableExists("recordings") else { return }
+        let recordingColumns = Set(try db.columns(in: "recordings").map(\.name))
+        guard recordingColumns.contains("speaker_review_status") else { return }
+
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id, speaker_reviewed_at
+                FROM recordings
+                WHERE speaker_review_status = ?
+                ORDER BY id
+            """,
+            arguments: [RecordingSpeakerReviewStatus.gold.rawValue]
+        )
+        for row in rows {
+            guard let recordingID: Int64 = row["id"] else { continue }
+            let reviewedAt: Date = row["speaker_reviewed_at"] ?? Date()
+            try SpeakerPairGoldStore.recordConversationGold(
+                db,
+                recordingID: recordingID,
+                now: reviewedAt
+            )
+        }
+    }
+
     static func confirmGold(
         _ db: Database,
         recordingId: Int64,
@@ -74,6 +105,13 @@ enum SpeakerGoldReviewStore {
                     recordingId
                 ]
             )
+            if try db.tableExists("speaker_pair_gold_labels") {
+                try SpeakerPairGoldStore.recordConversationGold(
+                    db,
+                    recordingID: recordingId,
+                    now: reviewedAt
+                )
+            }
         }
         try setStatus(db, recordingId: recordingId, status: .gold, reviewedAt: reviewedAt)
     }
@@ -83,6 +121,7 @@ enum SpeakerGoldReviewStore {
         recordingId: Int64,
         reviewedAt: Date = Date()
     ) throws {
+        try removeDerivedGold(db, recordingId: recordingId)
         try setStatus(db, recordingId: recordingId, status: .needsCorrection, reviewedAt: reviewedAt)
     }
 
@@ -91,6 +130,7 @@ enum SpeakerGoldReviewStore {
         recordingId: Int64,
         reviewedAt: Date = Date()
     ) throws {
+        try removeDerivedGold(db, recordingId: recordingId)
         try setStatus(db, recordingId: recordingId, status: .inProgress, reviewedAt: reviewedAt)
     }
 
@@ -101,6 +141,7 @@ enum SpeakerGoldReviewStore {
         recordingId: Int64,
         reviewedAt: Date = Date()
     ) throws {
+        try removeDerivedGold(db, recordingId: recordingId)
         try db.execute(
             sql: """
                 UPDATE recordings SET speaker_review_status = ?, speaker_reviewed_at = ?
@@ -111,6 +152,7 @@ enum SpeakerGoldReviewStore {
     }
 
     static func clear(_ db: Database, recordingId: Int64) throws {
+        try removeDerivedGold(db, recordingId: recordingId)
         try db.execute(
             sql: "UPDATE recordings SET speaker_review_status = NULL, speaker_reviewed_at = NULL WHERE id = ?",
             arguments: [recordingId]
@@ -127,5 +169,40 @@ enum SpeakerGoldReviewStore {
             sql: "UPDATE recordings SET speaker_review_status = ?, speaker_reviewed_at = ? WHERE id = ?",
             arguments: [status.rawValue, reviewedAt, recordingId]
         )
+    }
+
+    private static func removeDerivedGold(
+        _ db: Database,
+        recordingId: Int64
+    ) throws {
+        if try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.deleteDerivedLabels(
+                db,
+                actionID: "conversation-gold:\(recordingId)"
+            )
+        }
+        // Gold is trusted enrollment. If the conversation is reopened, remove only the trust that
+        // came from that confirmation. A later explicit assignment has another matcher and stays
+        // manual/gold.
+        if try db.tableExists("speaker_global_assignments") {
+            try db.execute(
+                sql: """
+                    UPDATE speaker_global_assignments SET
+                        state = ?, source = ?, confidence = MIN(confidence, 0.8),
+                        matcher = 'conversation-gold-invalidated',
+                        operation_id = NULL, updated_at = ?
+                    WHERE matcher = 'user-conversation-gold'
+                      AND local_cluster_id IN (
+                          SELECT id FROM speaker_local_clusters WHERE recording_id = ?
+                      )
+                """,
+                arguments: [
+                    GlobalSpeakerAssignmentState.legacy.rawValue,
+                    SpeakerAssignmentSource.reviewCarryover.rawValue,
+                    Date(),
+                    recordingId
+                ]
+            )
+        }
     }
 }

@@ -2,9 +2,8 @@ import Foundation
 
 /// A single downloadable LLM model: the main GGUF plus its audio multimodal projector (mmproj).
 ///
-/// Shared by every llama.cpp-backed transcription engine (Voxtral, Gemma). `modelFile`/`mmprojFile`
-/// are the LOCAL filenames on disk (which may differ from the URL basename so that two engines'
-/// identically-named projectors — both repos ship `mmproj-BF16.gguf` — don't collide in one folder).
+/// Model catalog record shared with Voxtral and Gemma. Text-only Gemma tasks need only the main
+/// GGUF; audio-grounded consensus additionally requires the matching projector.
 struct LLMModelConfig {
     let name: String
     let modelFile: String
@@ -12,11 +11,10 @@ struct LLMModelConfig {
     let modelURL: String
     let mmprojURL: String
     let sizeGB: Double
+    let mmprojSizeGB: Double
 }
 
-/// Builds the `llama-mtmd-cli` argument list for one engine. Voxtral and Gemma both shell out to the
-/// same multimodal binary but with different sampling/flags (Gemma needs `--jinja` and a non-greedy
-/// sampler), so the argument construction is the per-engine seam injected into `LlamaCppProcessRunner`.
+/// Builds the `llama-mtmd-cli` argument list for an audio transcription engine (currently Voxtral).
 protocol LLMTranscriptionParameters {
     /// Default sampling for this engine, with an optional context-aware prompt.
     func buildArguments(modelPath: String, mmprojPath: String, audioPath: String, contextPrompt: String?) -> [String]

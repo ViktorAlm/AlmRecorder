@@ -2,12 +2,13 @@ import Foundation
 
 /// Represents an embedding generation job in the queue
 struct EmbeddingJob: Identifiable, Codable {
-    let id = UUID()
+    // These values must remain stable when a persisted job is decoded.
+    var id = UUID()
     let recordingId: Int64
     let recordingTitle: String
     var utteranceData: [UtteranceEmbeddingData]
     let priority: Priority
-    let createdAt = Date()
+    var createdAt = Date()
     
     var status: JobStatus = .pending
     var startedAt: Date?

@@ -22,6 +22,14 @@ struct TranscriptionResult {
     
     /// Language detected or specified
     let language: String?
+
+    /// Confidence from Whisper's audio language classifier. Nil when the user selected a
+    /// language explicitly or when the backend did not expose a probability.
+    var languageConfidence: Float? = nil
+
+    /// `whisper_audio`, `user_selected`, `transcript_fallback`, or nil for legacy/backends that
+    /// do not expose language provenance.
+    var languageDetectionSource: String? = nil
     
     /// Whether VAD was used for chunking
     let usedVAD: Bool

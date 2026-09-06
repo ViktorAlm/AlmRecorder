@@ -50,21 +50,24 @@ class VoxtralLogger: VoxtralLogging {
     /// Maximum log file size (10MB)
     private let maxLogFileSize: Int = 10 * 1024 * 1024
     
-    private init() {
+    init(logFileURL: URL? = nil) {
         self.logger = Logger(subsystem: subsystem, category: "VoxtralCpp")
         
         // Setup log file path
-        let logsDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let defaultLogsDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library")
             .appendingPathComponent("Logs")
             .appendingPathComponent("AlmRecorder")
+        let resolvedLogFileURL = logFileURL
+            ?? defaultLogsDirectory.appendingPathComponent("voxtral.log")
+        let logsDirectory = resolvedLogFileURL.deletingLastPathComponent()
         
         // Create logs directory if it doesn't exist
         try? FileManager.default.createDirectory(at: logsDirectory, 
                                                 withIntermediateDirectories: true, 
                                                 attributes: nil)
         
-        self.logFileURL = logsDirectory.appendingPathComponent("voxtral.log")
+        self.logFileURL = resolvedLogFileURL
         
         // Always enable console output and file logging in DEBUG builds
         #if DEBUG
@@ -77,7 +80,7 @@ class VoxtralLogger: VoxtralLogging {
         setupLogFile()
         
         // Log startup message
-        info("VoxtralLogger initialized. Log file: \(logFileURL.path)")
+        info("VoxtralLogger initialized. Log file: \(self.logFileURL.path)")
     }
     
     func debug(_ message: String) {
@@ -144,23 +147,29 @@ class VoxtralLogger: VoxtralLogging {
     /// Setup the log file, creating it if necessary
     private func setupLogFile() {
         fileQueue.sync {
-            // Create file if it doesn't exist
-            if !FileManager.default.fileExists(atPath: logFileURL.path) {
-                FileManager.default.createFile(atPath: logFileURL.path, 
-                                              contents: nil, 
-                                              attributes: nil)
-            }
-            
-            // Check file size and rotate if necessary
-            rotateLogFileIfNeeded()
-            
-            // Open file handle for appending
-            do {
-                fileHandle = try FileHandle(forWritingTo: logFileURL)
-                fileHandle?.seekToEndOfFile()
-            } catch {
-                print("Failed to open log file: \(error)")
-            }
+            setupLogFileOnQueue()
+        }
+    }
+
+    /// The caller must already own `fileQueue`. Keeping the locked implementation separate is
+    /// essential: a lazy reopen from `writeToLogFile` or `clearLogFile` used to call the syncing
+    /// wrapper recursively and crash with libdispatch's "queue already owned" trap.
+    private func setupLogFileOnQueue() {
+        if !FileManager.default.fileExists(atPath: logFileURL.path) {
+            FileManager.default.createFile(
+                atPath: logFileURL.path,
+                contents: nil,
+                attributes: nil
+            )
+        }
+
+        rotateLogFileIfNeeded()
+
+        do {
+            fileHandle = try FileHandle(forWritingTo: logFileURL)
+            fileHandle?.seekToEndOfFile()
+        } catch {
+            print("Failed to open log file: \(error)")
         }
     }
     
@@ -172,19 +181,15 @@ class VoxtralLogger: VoxtralLogging {
             let messageWithNewline = message + "\n"
             guard let data = messageWithNewline.data(using: .utf8) else { return }
             
-            do {
-                if self.fileHandle == nil {
-                    self.setupLogFile()
-                }
-                
-                self.fileHandle?.write(data)
-                
-                // Flush to disk periodically
-                if Int.random(in: 0..<10) == 0 {
-                    self.fileHandle?.synchronizeFile()
-                }
-            } catch {
-                print("Failed to write to log file: \(error)")
+            if self.fileHandle == nil {
+                self.setupLogFileOnQueue()
+            }
+
+            self.fileHandle?.write(data)
+
+            // Flush to disk periodically
+            if Int.random(in: 0..<10) == 0 {
+                self.fileHandle?.synchronizeFile()
             }
         }
     }
@@ -261,10 +266,18 @@ class VoxtralLogger: VoxtralLogging {
             FileManager.default.createFile(atPath: logFileURL.path, 
                                           contents: nil, 
                                           attributes: nil)
-            setupLogFile()
+            setupLogFileOnQueue()
         }
         
         info("Log file cleared")
+    }
+
+    /// Flush every queued log write. Useful before exporting diagnostics and for deterministic
+    /// verification of the asynchronous file logger.
+    func flushLogFile() {
+        fileQueue.sync {
+            fileHandle?.synchronizeFile()
+        }
     }
     
     /// Get the path to the log file

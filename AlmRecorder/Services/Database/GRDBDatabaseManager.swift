@@ -1123,6 +1123,72 @@ class GRDBDatabaseManager {
             self.logger.info("[GRDBDatabaseManager] Migration v39_durable_retranscription_target completed")
         }
 
+        migrator.registerMigration("v40_calibrated_global_speaker_reconciliation") { db in
+            self.logger.info(
+                "[GRDBDatabaseManager] Running migration "
+                    + "v40_calibrated_global_speaker_reconciliation"
+            )
+            // v31/v32 have already run in existing libraries. Re-running these idempotent schema
+            // builders adds the held-out dataset role and the reversible reconciliation log.
+            try GlobalSpeakerIdentityStore.migrate(db)
+            try SpeakerPairGoldStore.migrate(db)
+            try SpeakerGoldReviewStore.backfillDerivedGold(db)
+            self.logger.info(
+                "[GRDBDatabaseManager] Migration "
+                    + "v40_calibrated_global_speaker_reconciliation completed"
+            )
+        }
+
+        migrator.registerMigration("v41_mcp_recording_privacy") { db in
+            self.logger.info("[GRDBDatabaseManager] Running migration v41_mcp_recording_privacy")
+
+            let recordingColumns = Set(try db.columns(in: "recordings").map(\.name))
+            if !recordingColumns.contains("mcp_access_enabled") {
+                try db.alter(table: "recordings") {
+                    $0.add(column: "mcp_access_enabled", .boolean)
+                        .notNull()
+                        .defaults(to: true)
+                }
+            }
+
+            let tagColumns = Set(try db.columns(in: "tags").map(\.name))
+            if !tagColumns.contains("mcp_hidden") {
+                try db.alter(table: "tags") {
+                    $0.add(column: "mcp_hidden", .boolean)
+                        .notNull()
+                        .defaults(to: false)
+                }
+            }
+
+            try db.create(
+                index: "idx_recordings_mcp_access",
+                on: "recordings",
+                columns: ["mcp_access_enabled"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_tags_mcp_hidden",
+                on: "tags",
+                columns: ["mcp_hidden"],
+                ifNotExists: true
+            )
+            try MCPRecordingPrivacyPolicy.installView(in: db)
+
+            self.logger.info("[GRDBDatabaseManager] Migration v41_mcp_recording_privacy completed")
+        }
+
+        migrator.registerMigration("v42_recording_transcription_provenance") { db in
+            self.logger.info(
+                "[GRDBDatabaseManager] Running migration v42_recording_transcription_provenance"
+            )
+            let columns = Set(try db.columns(in: "recordings").map(\.name))
+            if !columns.contains("transcription_provenance_json") {
+                try db.alter(table: "recordings") {
+                    $0.add(column: "transcription_provenance_json", .text)
+                }
+            }
+        }
+
         // Run migrations
         logger.info("[GRDBDatabaseManager] Starting database migrations...")
         isMigrating = true

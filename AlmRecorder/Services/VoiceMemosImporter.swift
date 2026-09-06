@@ -39,7 +39,7 @@ class VoiceMemosImporter: ObservableObject {
             
             let audioFiles = fileURLs.filter { url in
                 let ext = url.pathExtension.lowercased()
-                return ext == "m4a" || ext == "mp3" || ext == "wav" || ext == "aiff"
+                return ext == "m4a" || ext == "mp3" || ext == "wav" || ext == "aiff" || ext == "qta"
             }
             
             voiceMemos = audioFiles.map { VoiceMemoFile(url: $0) }

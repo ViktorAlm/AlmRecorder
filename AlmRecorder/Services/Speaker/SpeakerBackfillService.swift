@@ -1,12 +1,10 @@
 import Foundation
 
-/// One-time rebuild of speaker identity for already-transcribed recordings, without re-transcribing.
+/// Resumable, non-destructive acoustic-evidence backfill for historical local speaker clusters.
 ///
-/// FluidAudio became the standard diarizer after most of the library was transcribed by the legacy
-/// DBSCAN path, so the DB holds a mixed/incoherent speaker set. This service clears that set and
-/// rebuilds it from scratch: re-diarize each recording's audio with FluidAudio, unify voices across
-/// files into stable speakers (same matcher as the live path), and stamp `speaker_uuid` onto each
-/// utterance by time-overlap. Transcript text is never touched.
+/// Fresh FluidAudio diarization is matched to immutable legacy timelines. Only a missing embedding
+/// is filled, and only when one new voice dominates the old cluster's speech span. Names, manual or
+/// gold assignments, pair labels, UUID projections, transcript text, and undo history are untouched.
 @MainActor
 final class SpeakerBackfillService: ObservableObject {
     static let shared = SpeakerBackfillService()
@@ -19,86 +17,30 @@ final class SpeakerBackfillService: ObservableObject {
 
     private let recordingRepo = GRDBRecordingRepository()
     private let utteranceRepo = GRDBUtteranceRepository()
-    private let speakerService = SpeakerIdentificationService()
+    private var runTask: Task<Void, Never>?
+    private var runGeneration: UUID?
+    private var shouldResumeAfterPreemption = false
 
-    /// Rebuild the entire speaker set from audio. Refuses to run while the transcription queue is
-    /// active (both want FluidAudio + the DB) — run it when the queue is idle.
+    /// Fill missing evidence recording-by-recording. Completed rows are the durable checkpoint, so
+    /// relaunching or preempting the operation naturally resumes at the first remaining recording.
     func run() async {
-        guard !isRunning else { return }
-        if TranscriptionQueueManager.shared.isProcessing {
-            statusText = "Queue is busy — run this when transcription is idle."
-            return
-        }
-
+        guard runTask == nil else { return }
+        let generation = UUID()
+        runGeneration = generation
         isRunning = true
         processed = 0
-        total = 0
         lastSummary = nil
-        statusText = "Preparing…"
-        defer { isRunning = false }
-
-        let recordings = (try? recordingRepo.getAll(limit: 100_000)) ?? []
-        total = recordings.count
-        guard !recordings.isEmpty else {
-            statusText = "No recordings to process."
-            return
+        statusText = "Finding local voices without acoustic evidence…"
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performRun()
         }
-
-        // Load FluidAudio once and reuse across the whole batch.
-        let service: FluidAudioEmbeddingService
-        do {
-            service = try await FluidAudioEmbeddingService()
-        } catch {
-            statusText = "FluidAudio unavailable: \(error.localizedDescription)"
-            return
-        }
-
-        // 1) Wipe the legacy/mixed speaker set so the rebuild is coherent.
-        clearSpeakerState()
-
-        // 2) Rebuild an accumulating speaker set, recording by recording.
-        var assignedUtterances = 0
-        for (idx, rec) in recordings.enumerated() {
-            processed = idx
-            guard let recId = rec.id,
-                  let path = rec.filePath,
-                  FileManager.default.fileExists(atPath: path) else {
-                continue
-            }
-
-            statusText = "Diarizing \(rec.title) (\(idx + 1)/\(recordings.count))…"
-            do {
-                let turns = try await service.diarize(URL(fileURLWithPath: path))
-                guard !turns.isEmpty else { continue }
-
-                let clusters = Self.averageClusters(from: turns)
-                guard !clusters.isEmpty else { continue }
-
-                let labelToUUID = speakerService.resolveClusters(clusters, recordingId: Int(recId))
-                guard !labelToUUID.isEmpty else { continue }
-
-                // Stamp speaker_uuid (+ a tidy display label) onto each utterance by time-overlap.
-                let utterances = (try? utteranceRepo.getByRecordingId(recId, includeHidden: true)) ?? []
-                var updates: [(id: Int64, label: String, uuid: String)] = []
-                for u in utterances {
-                    guard let uid = u.id,
-                          let raw = SpeakerAlignment.speaker(
-                              forUtteranceStart: u.startTime, end: u.endTime, turns: turns),
-                          let uuid = labelToUUID[raw] else { continue }
-                    updates.append((id: uid, label: "Speaker \(raw)", uuid: uuid))
-                }
-                applyUtteranceUpdates(updates)
-                assignedUtterances += updates.count
-            } catch {
-                statusText = "Skipped \(rec.title): \(error.localizedDescription)"
-            }
-        }
-
-        processed = recordings.count
-        let speakerCount = (try? speakerService.loadKnownSpeakers().count) ?? 0
-        let summary = "Rebuilt \(speakerCount) speakers across \(recordings.count) recordings; \(assignedUtterances) utterances labeled."
-        lastSummary = summary
-        statusText = summary
+        runTask = task
+        await task.value
+        guard runGeneration == generation else { return }
+        runTask = nil
+        runGeneration = nil
+        isRunning = false
     }
 
     /// Build the same duration-weighted identity evidence used by live transcription, including
@@ -107,38 +49,145 @@ final class SpeakerBackfillService: ObservableObject {
         SpeakerAlignment.identityClusters(from: turns, policy: .durationWeighted)
     }
 
-    private func clearSpeakerState() {
-        statusText = "Clearing legacy speakers…"
-        try? GRDBDatabaseManager.shared.write { db in
-            try db.execute(
-                sql: """
-                    UPDATE utterances SET
-                        speaker_uuid = NULL,
-                        speaker_assignment_source = ?,
-                        speaker_reviewed_at = NULL
-                """,
-                arguments: [SpeakerAssignmentSource.model.rawValue]
-            )
-            try db.execute(
-                sql: "UPDATE recordings SET speaker_review_status = NULL, speaker_reviewed_at = NULL"
-            )
-            try db.execute(sql: "DELETE FROM speakers")
-            // Old UUIDs are gone — drop everything that referenced them.
-            try? db.execute(sql: "DELETE FROM speaker_attendee_mappings")
-            try? db.execute(sql: "DELETE FROM speaker_embedding_history")
-            try? db.execute(sql: "DELETE FROM speaker_merge_history")
-        }
+    func stopProcessingForPreemption() {
+        guard runTask != nil else { return }
+        shouldResumeAfterPreemption = true
+        statusText = "Yielding speaker evidence backfill to foreground work…"
+        runTask?.cancel()
     }
 
-    private func applyUtteranceUpdates(_ updates: [(id: Int64, label: String, uuid: String)]) {
-        guard !updates.isEmpty else { return }
-        try? GRDBDatabaseManager.shared.write { db in
-            for u in updates {
-                try db.execute(
-                    sql: "UPDATE utterances SET speaker_uuid = ?, speaker = ? WHERE id = ?",
-                    arguments: [u.uuid, u.label, u.id]
+    func resumeAfterPreemption() {
+        guard shouldResumeAfterPreemption else { return }
+        shouldResumeAfterPreemption = false
+        Task { await run() }
+    }
+
+    private func performRun() async {
+        let acquired = await GPUResourceManager.shared.acquire(.speakerEvidenceBackfill)
+        guard acquired, !Task.isCancelled else {
+            statusText = "Speaker evidence backfill paused safely."
+            return
+        }
+        defer { GPUResourceManager.shared.release(.speakerEvidenceBackfill) }
+
+        let missingRecordingIDs: [Int64]
+        do {
+            missingRecordingIDs = try GRDBDatabaseManager.shared.read { db in
+                try Int64.fetchAll(
+                    db,
+                    sql: """
+                        SELECT DISTINCT recording_id
+                        FROM speaker_local_clusters
+                        WHERE embedding IS NULL
+                        ORDER BY recording_id
+                    """
                 )
             }
+        } catch {
+            statusText = "Could not inspect speaker evidence: \(error.localizedDescription)"
+            return
         }
+        let missingSet = Set(missingRecordingIDs)
+        let recordings = ((try? recordingRepo.getAll(limit: 100_000)) ?? [])
+            .filter { $0.id.map(missingSet.contains) == true }
+            .sorted { ($0.id ?? 0) < ($1.id ?? 0) }
+        total = recordings.count
+        guard !recordings.isEmpty else {
+            statusText = "Every local voice already has acoustic evidence."
+            lastSummary = statusText
+            return
+        }
+
+        let configuration = SpeakerPipelineSettings.shared.activeConfiguration
+        let service: FluidAudioEmbeddingService
+        do {
+            service = try await FluidAudioEmbeddingService(configuration: configuration)
+        } catch {
+            statusText = "FluidAudio unavailable: \(error.localizedDescription)"
+            return
+        }
+
+        var filled = 0
+        var skipped = 0
+        for (index, recording) in recordings.enumerated() {
+            do {
+                try Task.checkCancellation()
+            } catch {
+                statusText = "Speaker evidence backfill paused safely after \(processed) calls."
+                return
+            }
+            guard let recordingID = recording.id,
+                  let path = recording.filePath,
+                  FileManager.default.fileExists(atPath: path) else {
+                skipped += 1
+                processed = index + 1
+                continue
+            }
+            statusText = "Recovering voice evidence for \(recording.title) "
+                + "(\(index + 1)/\(recordings.count))…"
+            do {
+                let audioURL = URL(fileURLWithPath: path)
+                var run = try await service.diarizeDetailed(
+                    audioURL,
+                    configuration: configuration
+                )
+                if configuration.diarizationBackend == .offlineVBxTargetedSortformer {
+                    let utterances = (try? utteranceRepo.getByRecordingId(
+                        recordingID,
+                        includeHidden: true
+                    )) ?? []
+                    let timedWords = utterances.flatMap {
+                        SpeakerAlignment.approximateWordSegments(
+                            text: $0.text,
+                            start: $0.startTime,
+                            end: $0.endTime
+                        )
+                    }
+                    run = try await service.repairWithTargetedSortformer(
+                        audioURL,
+                        baseline: run,
+                        targetSegments: timedWords,
+                        configuration: configuration
+                    )
+                }
+                let evidence = SpeakerAlignment.identityClusters(
+                    from: run.turns,
+                    policy: configuration.centroidPolicy
+                )
+                filled += try GRDBDatabaseManager.shared.write { db in
+                    try GlobalSpeakerIdentityStore.backfillAcousticEvidence(
+                        db,
+                        recordingId: recordingID,
+                        evidence: evidence
+                    )
+                }
+            } catch is CancellationError {
+                statusText = "Speaker evidence backfill paused safely after \(processed) calls."
+                return
+            } catch {
+                skipped += 1
+                statusText = "Skipped \(recording.title): \(error.localizedDescription)"
+            }
+            processed = index + 1
+        }
+
+        let remaining = (try? GRDBDatabaseManager.shared.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM speaker_local_clusters WHERE embedding IS NULL"
+            ) ?? 0
+        }) ?? 0
+        if SpeakerPipelineSettings.shared.continuousReconciliationEnabled {
+            _ = try? GlobalSpeakerLibraryReconciliation.applyLatestIfSafe()
+        }
+        let summary = "Added acoustic evidence to \(filled) local voices across "
+            + "\(recordings.count - skipped) recordings; \(remaining) remain for review."
+        lastSummary = summary
+        statusText = summary
+    }
+
+    func cancel() {
+        shouldResumeAfterPreemption = false
+        runTask?.cancel()
     }
 }

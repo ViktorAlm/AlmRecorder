@@ -3,6 +3,12 @@ import Combine
 
 /// Unified download queue for all model types (Whisper, Voxtral, Embeddings)
 class UnifiedDownloadQueue: NSObject, ObservableObject {
+
+    struct AdditionalDownload {
+        let url: URL
+        let path: URL
+        let fileSize: Int64
+    }
     
     // MARK: - Download Task
     
@@ -14,13 +20,14 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         let downloadURL: URL
         let destinationPath: URL
         let fileSize: Int64
-        var additionalFiles: [(url: URL, path: URL)] = []
+        var additionalFiles: [AdditionalDownload] = []
         
         var state: DownloadState = .pending
         var progress: Double = 0.0
         var error: Error?
         var sessionTask: URLSessionDownloadTask?
         var retryCount: Int = 0
+        var retryNotBefore: Date?
         var startTime: Date?
         var bytesWritten: Int64 = 0
         var totalBytes: Int64 = 0
@@ -70,10 +77,36 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 2
         config.timeoutIntervalForRequest = 300
-        config.timeoutIntervalForResource = 7200
+        // The largest optional model exceeds 12 GB; slow but healthy connections need more than
+        // the former two-hour ceiling.
+        config.timeoutIntervalForResource = 8 * 60 * 60
         config.allowsCellularAccess = true
         
         self.urlSession = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+    }
+
+    /// Catalog sizes are estimates, but accepting any file larger than 1 MB lets a truncated GGUF
+    /// masquerade as an installed multi-gigabyte model. A 70% floor leaves room for deliberately
+    /// conservative catalog estimates while rejecting practically useful partial downloads.
+    static func minimumAcceptableBytes(declaredSize: Int64) -> Int64 {
+        max(1_000_000, Int64(Double(max(0, declaredSize)) * 0.70))
+    }
+
+    static func isAcceptableFileSize(
+        _ actualBytes: Int64,
+        declaredSize: Int64,
+        serverExpectedBytes: Int64? = nil
+    ) -> Bool {
+        guard actualBytes > 1_000_000 else { return false }
+        if let serverExpectedBytes, serverExpectedBytes > 1_000_000 {
+            return actualBytes == serverExpectedBytes
+        }
+        return actualBytes >= minimumAcceptableBytes(declaredSize: declaredSize)
+    }
+
+    static func retryIsReady(notBefore: Date?, now: Date = Date()) -> Bool {
+        guard let notBefore else { return true }
+        return notBefore <= now
     }
     
     // MARK: - Public Methods
@@ -86,23 +119,43 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         downloadURL: URL,
         destinationPath: URL,
         fileSize: Int64,
-        additionalFiles: [(url: URL, path: URL)] = []
+        additionalFiles: [AdditionalDownload] = []
     ) {
         // Check if already downloading or downloaded
-        if downloadTasks.contains(where: { 
+        if downloadTasks.contains(where: {
             $0.modelId == modelId && 
-            ($0.state == .pending || $0.state == .downloading || $0.state == .completed)
+            ($0.state == .pending || $0.state == .downloading)
         }) {
-            print("[UnifiedQueue] Model already in queue or downloaded: \(displayName)")
+            print("[UnifiedQueue] Model already in queue: \(displayName)")
             return
+        }
+
+        // A completed/failed row is historical UI state, not proof that the destination still
+        // exists. In particular, deleting a model must allow it to be downloaded again.
+        downloadTasks.removeAll {
+            $0.modelId == modelId
+                && ($0.state == .completed || $0.state == .failed || $0.state == .cancelled)
         }
         
         // Check if file already exists with valid size
         if FileManager.default.fileExists(atPath: destinationPath.path) {
             if let attributes = try? FileManager.default.attributesOfItem(atPath: destinationPath.path),
                let size = attributes[.size] as? Int64,
-               size > 1_000_000 { // Minimum 1MB
+               Self.isAcceptableFileSize(size, declaredSize: fileSize) {
                 print("[UnifiedQueue] Model already downloaded: \(displayName)")
+                var completed = DownloadTask(
+                    modelId: modelId,
+                    displayName: displayName,
+                    modelType: modelType,
+                    downloadURL: downloadURL,
+                    destinationPath: destinationPath,
+                    fileSize: fileSize,
+                    additionalFiles: additionalFiles
+                )
+                completed.state = .completed
+                completed.progress = 1
+                downloadTasks.append(completed)
+                enqueueAdditionalFiles(for: completed)
                 return
             } else {
                 // Remove corrupted file
@@ -155,6 +208,7 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         task.error = nil
         task.progress = 0
         task.retryCount = 0
+        task.retryNotBefore = nil
         downloadTasks[index] = task
         
         processQueue()
@@ -163,7 +217,7 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
     /// Clear completed/failed downloads from list
     func clearCompleted() {
         downloadTasks.removeAll { task in
-            task.state == .completed || task.state == .cancelled
+            task.state == .completed || task.state == .failed || task.state == .cancelled
         }
     }
     
@@ -183,7 +237,10 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         guard activeCount < maxConcurrentDownloads else { return }
         
         // Find next pending task
-        guard let nextIndex = downloadTasks.firstIndex(where: { $0.state == .pending }) else {
+        let now = Date()
+        guard let nextIndex = downloadTasks.firstIndex(where: {
+            $0.state == .pending && Self.retryIsReady(notBefore: $0.retryNotBefore, now: now)
+        }) else {
             updateActiveCount()
             return
         }
@@ -194,9 +251,10 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         if FileManager.default.fileExists(atPath: task.destinationPath.path) {
             if let attributes = try? FileManager.default.attributesOfItem(atPath: task.destinationPath.path),
                let size = attributes[.size] as? Int64,
-               size > 1_000_000 {
+               Self.isAcceptableFileSize(size, declaredSize: task.fileSize) {
                 task.state = .completed
                 downloadTasks[nextIndex] = task
+                enqueueAdditionalFiles(for: task)
                 processQueue()
                 return
             }
@@ -210,6 +268,7 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         
         task.sessionTask = sessionTask
         task.state = .downloading
+        task.retryNotBefore = nil
         task.startTime = Date()
         downloadTasks[nextIndex] = task
         
@@ -248,6 +307,16 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         let destinationPath = task.destinationPath
         
         do {
+            guard let response = sessionTask.response as? HTTPURLResponse,
+                  (200..<300).contains(response.statusCode) else {
+                let status = (sessionTask.response as? HTTPURLResponse)?.statusCode ?? -1
+                throw NSError(
+                    domain: "UnifiedQueue",
+                    code: status,
+                    userInfo: [NSLocalizedDescriptionKey: "Model host returned HTTP \(status)"]
+                )
+            }
+
             // Validate file size
             let attributes = try FileManager.default.attributesOfItem(atPath: location.path)
             let fileSize = attributes[.size] as? Int64 ?? 0
@@ -256,9 +325,20 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
             print("[UnifiedQueue] Source location: \(location.path)")
             print("[UnifiedQueue] Destination: \(destinationPath.path)")
             
-            guard fileSize > 1_000_000 else {
-                print("[UnifiedQueue] File too small: \(fileSize) bytes")
-                throw NSError(domain: "UnifiedQueue", code: 1, userInfo: [NSLocalizedDescriptionKey: "Downloaded file too small"])
+            let responseBytes = response.expectedContentLength > 0
+                ? response.expectedContentLength
+                : nil
+            guard Self.isAcceptableFileSize(
+                fileSize,
+                declaredSize: task.fileSize,
+                serverExpectedBytes: responseBytes
+            ) else {
+                print("[UnifiedQueue] File incomplete: \(fileSize) bytes")
+                throw NSError(
+                    domain: "UnifiedQueue",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Downloaded model is incomplete"]
+                )
             }
             
             // Create directory if needed
@@ -287,23 +367,13 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
             
             task.state = .completed
             task.progress = 1.0
+            task.sessionTask = nil
             downloadTasks[index] = task
             
             print("[UnifiedQueue] Completed download: \(task.displayName)")
             
             // Download additional files if any (e.g., mmproj for Voxtral)
-            if !task.additionalFiles.isEmpty {
-                for (url, path) in task.additionalFiles {
-                    enqueueDownload(
-                        modelId: "\(task.modelId)-additional",
-                        displayName: "\(task.displayName) (additional)",
-                        modelType: task.modelType,
-                        downloadURL: url,
-                        destinationPath: path,
-                        fileSize: 100_000_000 // Approximate
-                    )
-                }
-            }
+            enqueueAdditionalFiles(for: task)
             
         } catch {
             print("[UnifiedQueue] Failed to save downloaded file: \(error.localizedDescription)")
@@ -333,6 +403,7 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
             task.state = .pending
             task.error = nil
             task.sessionTask = nil
+            task.retryNotBefore = Date().addingTimeInterval(delay)
             downloadTasks[index] = task
             
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -353,6 +424,20 @@ class UnifiedDownloadQueue: NSObject, ObservableObject {
         updateActiveCount()
         processQueue()
     }
+
+    private func enqueueAdditionalFiles(for task: DownloadTask) {
+        for (index, additional) in task.additionalFiles.enumerated() {
+            let suffix = task.additionalFiles.count == 1 ? "additional" : "additional-\(index)"
+            enqueueDownload(
+                modelId: "\(task.modelId)-\(suffix)",
+                displayName: "\(task.displayName) (additional \(index + 1))",
+                modelType: task.modelType,
+                downloadURL: additional.url,
+                destinationPath: additional.path,
+                fileSize: additional.fileSize
+            )
+        }
+    }
 }
 
 // MARK: - URLSessionDownloadDelegate
@@ -368,7 +453,12 @@ extension UnifiedDownloadQueue: URLSessionDownloadDelegate {
         
         task.bytesWritten = totalBytesWritten
         task.totalBytes = totalBytesExpectedToWrite
-        task.progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        let expected = totalBytesExpectedToWrite > 0
+            ? totalBytesExpectedToWrite
+            : originalTask.fileSize
+        task.progress = expected > 0
+            ? min(1, Double(totalBytesWritten) / Double(expected))
+            : 0
         
         // Update on main thread to trigger UI updates
         DispatchQueue.main.async { [weak self] in

@@ -33,20 +33,26 @@ enum VibeVoiceQuantization: String, CaseIterable, Codable, Identifiable {
 /// The production transcription choice for new installations. Keep this centralized so first-run
 /// setup, settings fallbacks, queue snapshots, and tests cannot silently drift apart.
 enum TranscriptionProductionDefaults {
+    /// VibeVoice provides the best immediately useful transcript and native speaker-turn
+    /// structure. Whisper remains the independent, noise-robust nightly evidence pass.
     static let backend: TranscriptionBackend = .vibeVoice
     static let vibeVoiceQuantization: VibeVoiceQuantization = .fourBit
     static let vibeVoiceSpeakerMode: VibeVoiceSpeakerMode = .fused
 
-    /// One-time rollout marker. Existing installations adopt the new default only when the 4-bit
-    /// model is already present, avoiding a surprise unusable backend for people who have not
-    /// downloaded VibeVoice. Fresh installations always use the production default.
-    static let rolloutKey = "transcriptionDefaults.vibeVoice4BitFused.v1"
+    /// One-time rollout marker for both new and existing installations. Model readiness remains a
+    /// visible queue state; silently falling back would make provenance and comparisons dishonest.
+    static let rolloutKey = "transcriptionDefaults.vibeVoiceForegroundQuality.v1"
 
     static func shouldAdopt(
         hasStoredBackend: Bool,
         hasFourBitModel: Bool
     ) -> Bool {
-        !hasStoredBackend || hasFourBitModel
+        // Retain the parameters until older callers have migrated. The explicit product rollout
+        // must select VibeVoice even before its model download completes so the queue can explain
+        // exactly what it is waiting for.
+        _ = hasStoredBackend
+        _ = hasFourBitModel
+        return true
     }
 }
 
@@ -80,15 +86,14 @@ struct TranscriptionEngineSelection: Codable, Equatable {
     let vibeVoiceContext: String?
 
     static func snapshot(from settings: GlobalModelSettings = .shared) -> Self {
-        let llmModel: String?
-        switch settings.selectedLLMEngine {
-        case .voxtral: llmModel = settings.selectedVoxtralTranscriptionModel
-        case .gemma: llmModel = settings.selectedGemmaTranscriptionModel
-        }
+        // Gemma audio transcription is deferred. Never create a new queue snapshot that can route
+        // recording audio to Gemma, even if a stale in-memory preference still says `.gemma`.
+        let llmEngine: LLMEngine = .voxtral
+        let llmModel: String? = settings.selectedVoxtralTranscriptionModel
         return TranscriptionEngineSelection(
             backend: settings.transcriptionBackend,
             whisperVariantIdentifier: settings.selectedWhisperVariant?.toIdentifier(),
-            llmEngine: settings.selectedLLMEngine,
+            llmEngine: llmEngine,
             llmModelKey: llmModel,
             vibeVoiceQuantization: settings.selectedVibeVoiceQuantization,
             vibeVoiceSpeakerMode: settings.vibeVoiceSpeakerMode,

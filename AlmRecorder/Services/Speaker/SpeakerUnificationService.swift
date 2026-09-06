@@ -40,15 +40,10 @@ class SpeakerUnificationService {
     
     init(
         similarityThreshold: Float = 0.85,
-        embeddingService: (any SpeakerEmbeddingService)? = nil
-    ) throws {
+        embeddingService: any SpeakerEmbeddingService
+    ) {
         self.similarityThreshold = similarityThreshold
-        if let service = embeddingService {
-            self.embeddingService = service
-        } else {
-            // Default to test model if no service provided
-            self.embeddingService = try PyannoteSpeakerEmbedding()
-        }
+        self.embeddingService = embeddingService
     }
     
     // MARK: - Public Methods
@@ -168,7 +163,6 @@ class SpeakerUnificationService {
         // For cosine distance with speaker embeddings, use STRICTER epsilon for better separation
         // Lower epsilon = more strict clustering (speakers must be more similar to group)
         let epsilons: [Double] = [0.05, 0.08, 0.1, 0.13, 0.16, 0.2, 0.25, 0.3]
-        var bestClusters: [[[Float]]] = []
         var bestIndices: [[Int]] = []
         var bestScore: Float = -Float.infinity
         var bestEpsilon: Double = 0.15  // Prefer separation — users can merge later
@@ -241,8 +235,7 @@ class SpeakerUnificationService {
                 
                 if score > bestScore {
                     bestScore = score
-                    bestClusters = clusters
-                    bestIndices = clusterIndices
+                bestIndices = clusterIndices
                     bestEpsilon = epsilon
                 }
             }
@@ -455,7 +448,7 @@ class SpeakerUnificationService {
         var activeClusters = Set(0..<n)
         
         // Distance matrix (inverse of similarity)
-        var distances = similarityMatrix.map { row in
+        let distances = similarityMatrix.map { row in
             row.map { 1.0 - $0 }
         }
         

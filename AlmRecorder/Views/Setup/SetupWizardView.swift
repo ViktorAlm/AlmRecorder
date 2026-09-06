@@ -5,10 +5,11 @@ import AppKit
 /// connect the Voice Memos folder. Reuses the existing model managers + `UnifiedDownloadQueue`, so
 /// downloads continue in the background and show in the app-wide banner after the wizard closes.
 struct SetupWizardView: View {
-    var onFinish: () -> Void
+    var onFinish: (NavigationItem) -> Void
 
     enum Step: Int, CaseIterable { case system, permissions, models, voiceMemos, done }
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var step: Step = .system
     @State private var ramGB = SystemSpecs.physicalMemoryGB
     @State private var startedDownloads = false
@@ -17,10 +18,28 @@ struct SetupWizardView: View {
     @ObservedObject private var permissions = PermissionsManager.shared
     @ObservedObject private var vibeVoiceModels = VibeVoiceModelManager.shared
     @ObservedObject private var vibeVoiceRuntime = VibeVoiceRuntimeInstaller.shared
+    @ObservedObject private var embeddingModels = EmbeddingModelManager.shared
+    @StateObject private var gemmaModels = GemmaModelManager()
     @State private var voiceMemosConnected = false
+    @State private var downloadError: String?
 
     private var tier: SystemTier { SystemSpecs.tier(ramGB: ramGB) }
     private var plan: SetupModelPlan { SetupRecommender.plan(ramGB: ramGB) }
+    private var transcriptionModelInstalled: Bool {
+        vibeVoiceRuntime.isInstalled
+            && vibeVoiceModels.isModelDownloaded(plan.vibeVoiceQuantization)
+    }
+    private var gemmaModelInstalled: Bool {
+        gemmaModels.isModelDownloaded(plan.gemmaKey)
+    }
+    private var embeddingModelInstalled: Bool {
+        embeddingModels.isModelDownloaded(plan.embeddingId)
+    }
+    private var allRecommendedModelsInstalled: Bool {
+        transcriptionModelInstalled
+            && gemmaModelInstalled
+            && embeddingModelInstalled
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +52,10 @@ struct SetupWizardView: View {
         }
         .frame(width: 660, height: 580)
         .task { await permissions.refresh() }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await permissions.refresh() }
+        }
     }
 
     // MARK: - Chrome
@@ -86,13 +109,23 @@ struct SetupWizardView: View {
             case .system:
                 Button("Continue") { advance() }.buttonStyle(.borderedProminent)
             case .permissions:
-                Button("Continue") { advance() }.buttonStyle(.borderedProminent)
+                if permissions.microphone == .granted {
+                    Button("Continue") { advance() }.buttonStyle(.borderedProminent)
+                } else {
+                    Button("Skip for now") { advance() }
+                }
             case .models:
-                Button(startedDownloads ? "Continue" : "Download Models") {
-                    if startedDownloads { advance() } else { startDownloads(); }
+                Button(modelPrimaryActionTitle) {
+                    if allRecommendedModelsInstalled || startedDownloads {
+                        advance()
+                    } else {
+                        startDownloads()
+                    }
                 }
                 .buttonStyle(.borderedProminent)
-                if startedDownloads { } else { Button("Skip for now") { advance() } }
+                if !allRecommendedModelsInstalled && !startedDownloads {
+                    Button("Skip for now") { advance() }
+                }
             case .voiceMemos:
                 if voiceMemosConnected {
                     Button("Continue") { advance() }.buttonStyle(.borderedProminent)
@@ -100,7 +133,10 @@ struct SetupWizardView: View {
                     Button("Skip") { advance() }
                 }
             case .done:
-                Button("Start Using AlmRecorder") { onFinish() }.buttonStyle(.borderedProminent)
+                Button("Open Library") { onFinish(.library) }
+                Button("Start Recording") { onFinish(.record) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
             }
         }
         .padding(16)
@@ -108,6 +144,12 @@ struct SetupWizardView: View {
 
     private func advance() {
         withAnimation { step = Step(rawValue: step.rawValue + 1) ?? .done }
+    }
+
+    private var modelPrimaryActionTitle: String {
+        if allRecommendedModelsInstalled { return "Continue" }
+        if startedDownloads { return "Continue" }
+        return "Download Models"
     }
 
     // MARK: - Step 1: system
@@ -163,32 +205,34 @@ struct SetupWizardView: View {
 
     private var permissionsStep: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Grant permissions").font(.title2.bold())
-            Text("AlmRecorder records and transcribes on your Mac. **Microphone** and **Screen Recording** are needed to capture meetings; **Calendar** and **Notifications** enable auto-record prompts.")
+            Text("Allow recording access").font(.title2.bold())
+            Text("The **microphone** records you. **Screen Recording** adds the other people in calls as a separate system-audio track. You can still import and search without either permission.")
                 .foregroundColor(.secondary)
 
             VStack(spacing: 0) {
-                permissionRow("mic.fill", "Microphone", "Record your voice", permissions.microphone, required: true) {
+                permissionRow("mic.fill", "Microphone", "Required when you start a recording", permissions.microphone, required: true) {
                     Task { await permissions.requestMicrophone() }
                 }
                 Divider()
-                permissionRow("rectangle.dashed.badge.record", "Screen Recording", "Capture system / meeting audio", permissions.screenRecording, required: true) {
+                permissionRow("rectangle.dashed.badge.record", "System audio", "Recommended for calls and meetings", permissions.screenRecording, required: false) {
                     permissions.requestScreenRecording()
                 }
                 Divider()
-                permissionRow("calendar", "Calendar", "Detect meetings to record", permissions.calendar, required: false) {
-                    Task { await permissions.requestCalendar() }
-                }
-                Divider()
-                permissionRow("bell.badge", "Notifications", "Prompt you to record meetings", permissions.notifications, required: false) {
-                    Task { await permissions.requestNotifications() }
+                permissionRow(
+                    "keyboard",
+                    "Realtime dictation",
+                    "Required for the global Fn shortcut and text insertion",
+                    permissions.accessibility,
+                    required: true
+                ) {
+                    permissions.requestAccessibility()
                 }
             }
             .background(Color(NSColor.controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
             if permissions.screenRecording != .granted {
-                Label("Screen Recording may need you to quit and reopen AlmRecorder before it takes effect.",
+                Label("macOS may ask you to reopen AlmRecorder after system-audio access is granted. Calendar prompts can be enabled later from Meetings.",
                       systemImage: "info.circle")
                     .font(.caption).foregroundColor(.secondary)
             }
@@ -235,34 +279,33 @@ struct SetupWizardView: View {
     private var modelsStep: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Download your models").font(.title2.bold())
-            Text("Picked for your \(ramGB) GB Mac. These power transcription, the AI profiles/summaries, and semantic search. You can change them later in Settings → Models.")
+            Text("Picked for your \(ramGB) GB Mac. These power recording transcription, realtime Fn dictation, AI profiles/summaries, and semantic search. You can change them later in Settings.")
                 .foregroundColor(.secondary)
 
             VStack(spacing: 0) {
                 modelRow(
-                    icon: "waveform",
-                    title: "Transcription",
-                    name: "\(plan.vibeVoiceQuantization.displayName) · AlmRecorder fused",
+                    icon: "waveform.badge.mic",
+                    title: "Transcription + realtime Fn dictation",
+                    name: "Full VibeVoice ASR \(plan.vibeVoiceQuantization.displayName) · MLX/Metal",
                     size: bytesString(plan.vibeVoiceQuantization.estimatedDownloadBytes),
-                    done: vibeVoiceRuntime.isInstalled
-                        && vibeVoiceModels.isModelDownloaded(plan.vibeVoiceQuantization)
+                    done: transcriptionModelInstalled
                 )
                 Divider()
                 modelRow(icon: "brain", title: "AI (multimodal)", name: gemmaName,
                          size: gbString(gemmaGB),
-                         done: GemmaModelManager().isModelDownloaded(plan.gemmaKey))
+                         done: gemmaModelInstalled)
                 Divider()
                 modelRow(icon: "magnifyingglass", title: "Search", name: embeddingName,
                          size: mbString(embeddingMB),
-                         done: EmbeddingModelManager.shared.isModelDownloaded(plan.embeddingId))
+                         done: embeddingModelInstalled)
             }
             .background(Color(NSColor.controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
             HStack {
-                Text("Total download ≈ \(gbString(totalGB))").font(.callout).foregroundColor(.secondary)
+                Text(downloadSizeDescription).font(.callout).foregroundColor(.secondary)
                 Spacer()
-                Text("\(SystemSpecs.freeDiskGB) GB free").font(.caption).foregroundColor(SystemSpecs.freeDiskGB < Int(totalGB) + 5 ? .orange : .secondary)
+                Text("\(SystemSpecs.freeDiskGB) GB free").font(.caption).foregroundColor(SystemSpecs.freeDiskGB < Int(remainingDownloadGB) + 5 ? .orange : .secondary)
             }
 
             if startedDownloads {
@@ -270,6 +313,16 @@ struct SetupWizardView: View {
                     .font(.caption).foregroundColor(.secondary)
                 ModelDownloadProgressView()
                     .frame(maxHeight: 160)
+            }
+
+            if let downloadError {
+                Label(downloadError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -325,7 +378,9 @@ struct SetupWizardView: View {
         VStack(alignment: .leading, spacing: 16) {
             Image(systemName: "checkmark.seal.fill").font(.system(size: 48)).foregroundColor(.green)
             Text("You're all set").font(.title.bold())
-            Text("Models are \(startedDownloads ? "downloading in the background" : "ready to download from Settings → Models"). Record from the Record tab, import files, or let Voice Memos flow in. Everything stays on your Mac.")
+            Text(doneModelsMessage)
+                .foregroundColor(.secondary)
+            Text("Start a recording now, or open your Library to import and find existing audio. Everything stays on your Mac.")
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -335,29 +390,42 @@ struct SetupWizardView: View {
 
     private func startDownloads() {
         let vibeVoiceQuantization = plan.vibeVoiceQuantization
+        downloadError = nil
         Task {
-            if !vibeVoiceRuntime.isInstalled {
-                try? await vibeVoiceRuntime.install()
+            do {
+                if !vibeVoiceRuntime.isInstalled {
+                    try await vibeVoiceRuntime.install()
+                }
+                if !vibeVoiceModels.isModelDownloaded(vibeVoiceQuantization) {
+                    try await vibeVoiceModels.downloadModel(vibeVoiceQuantization)
+                }
+            } catch {
+                await MainActor.run {
+                    downloadError = "Transcription model download failed: \(error.localizedDescription)"
+                }
             }
-            if !vibeVoiceModels.isModelDownloaded(vibeVoiceQuantization) {
-                try? await vibeVoiceModels.downloadModel(vibeVoiceQuantization)
+        }
+        if !gemmaModels.isModelDownloaded(plan.gemmaKey) {
+            Task {
+                do {
+                    try await gemmaModels.downloadModel(plan.gemmaKey)
+                } catch {
+                    await MainActor.run {
+                        downloadError = "AI model download failed: \(error.localizedDescription)"
+                    }
+                }
             }
         }
-        let gemma = GemmaModelManager()
-        if !gemma.isModelDownloaded(plan.gemmaKey) {
-            Task { try? await gemma.downloadModel(plan.gemmaKey) }
+        if !embeddingModels.isModelDownloaded(plan.embeddingId) {
+            Task { await embeddingModels.ensureDefaultModel() }
         }
-        if !EmbeddingModelManager.shared.isModelDownloaded(plan.embeddingId) {
-            Task { await EmbeddingModelManager.shared.ensureDefaultModel() }
-        }
-
         // Make the recommended models the active selections.
         let s = GlobalModelSettings.shared
         s.selectedVibeVoiceQuantization = vibeVoiceQuantization
         s.vibeVoiceSpeakerMode = TranscriptionProductionDefaults.vibeVoiceSpeakerMode
         s.transcriptionBackend = TranscriptionProductionDefaults.backend
-        s.selectedLLMEngine = .gemma
-        s.selectedGemmaTranscriptionModel = plan.gemmaKey
+        // Gemma is installed for text-only summaries/consensus, never for audio transcription.
+        s.selectedLLMEngine = .voxtral
         s.selectedTextLLMModel = plan.gemmaKey
         s.selectedEmbeddingModel = plan.embeddingId
 
@@ -378,14 +446,28 @@ struct SetupWizardView: View {
     private var gemmaName: String { GemmaConfiguration.models[plan.gemmaKey]?.name ?? plan.gemmaKey }
     private var gemmaGB: Double { GemmaConfiguration.models[plan.gemmaKey]?.sizeGB ?? 0 }
     private var embeddingModel: EmbeddingModelConfig? {
-        EmbeddingModelManager.shared.availableModels.first { $0.id == plan.embeddingId }
+        embeddingModels.availableModels.first { $0.id == plan.embeddingId }
     }
     private var embeddingName: String { embeddingModel?.name ?? "Qwen3 Embedding 0.6B" }
     private var embeddingMB: Int { embeddingModel?.sizeInMB ?? 640 }
-    private var totalGB: Double {
-        Double(plan.vibeVoiceQuantization.estimatedDownloadBytes) / 1_000_000_000.0
-            + gemmaGB
-            + Double(embeddingMB) / 1000.0
+    private var remainingDownloadGB: Double {
+        (transcriptionModelInstalled ? 0 : Double(plan.vibeVoiceQuantization.estimatedDownloadBytes) / 1_000_000_000.0)
+            + (gemmaModelInstalled ? 0 : gemmaGB)
+            + (embeddingModelInstalled ? 0 : Double(embeddingMB) / 1000.0)
+    }
+    private var downloadSizeDescription: String {
+        allRecommendedModelsInstalled
+            ? "All recommended models are installed"
+            : "Remaining download ≈ \(gbString(remainingDownloadGB))"
+    }
+    private var doneModelsMessage: String {
+        if allRecommendedModelsInstalled {
+            return "Your recording transcription, realtime dictation, AI, and search models are installed."
+        }
+        if startedDownloads {
+            return "Model downloads have started and will continue in the background. Progress stays visible in the app."
+        }
+        return "You skipped model downloads. Recording still works, and the Library will guide you to Models before transcription or semantic search is needed."
     }
 
     private func mbString(_ mb: Int) -> String {

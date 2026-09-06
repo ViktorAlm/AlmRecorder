@@ -2,11 +2,10 @@ import Foundation
 import Combine
 import GRDB
 
-/// Background queue for transcript cleanup (hallucination detection + Gemma audio verification).
+/// Background queue for transcript cleanup (hallucination detection + human-review routing).
 ///
 /// Structural copy of `RecordingInsightsQueueManager`: jobs persisted to AppSettings only, and
-/// gated at the LOWEST GPU priority (`.cleanup`, below even insights) — each verification span
-/// reloads the whole Gemma model, so this work must always yield to anything user-facing.
+/// Gemma audio verification is deferred.
 final class TranscriptCleanupQueueManager: ObservableObject {
     static let shared = TranscriptCleanupQueueManager()
 
@@ -31,9 +30,9 @@ final class TranscriptCleanupQueueManager: ObservableObject {
     private let service = TranscriptCleanupService.shared
     private let settingsRepo = GRDBSettingsRepository.shared
     private let logger = VoxtralLogger.shared
-    private let gemmaModels = GemmaModelManager()
     private var cancellables = Set<AnyCancellable>()
     private var processingTask: Task<Void, Never>?
+    private var processingGeneration: UUID?
     private let maxRetries = 3
     private var maintenanceTimer: Timer?
     private let maintenanceInterval: TimeInterval = 900 // 15 minutes
@@ -104,14 +103,23 @@ final class TranscriptCleanupQueueManager: ObservableObject {
     // MARK: - Processing control
 
     func startProcessing() {
-        guard !isProcessing else { return }
+        guard processingGeneration == nil else { return }
+        // Latch synchronously before scheduling the detached task. Enqueue/backfill can call this
+        // repeatedly in one run-loop turn; setting the flag inside processQueue allowed every call
+        // to spawn another worker before the first task started.
+        let generation = UUID()
+        processingGeneration = generation
+        isProcessing = true
         // Task.detached so processing never inherits @MainActor (GPUResourceManager calls this).
-        processingTask = Task.detached { [weak self] in await self?.processQueue() }
+        processingTask = Task.detached { [weak self] in
+            await self?.processQueue(generation: generation)
+        }
     }
 
     func stopProcessing() {
         processingTask?.cancel()
         processingTask = nil
+        processingGeneration = nil
         isProcessing = false
         // Kill any in-flight llama-mtmd-cli so a preempting consumer gets the GPU promptly.
         TranscriptVerificationService.shared.cancel()
@@ -155,8 +163,7 @@ final class TranscriptCleanupQueueManager: ObservableObject {
         isSweeping = true
         defer { isSweeping = false }
         bootstrapExemplarMemoryIfNeeded()
-        let outcome = await TranscriptCleanupService.shared.runExemplarSweep()
-        await enqueueVerification(for: outcome.recordingIds)
+        _ = await TranscriptCleanupService.shared.runExemplarSweep()
     }
 
     /// Re-run the whole sweep with the current sensitivity (the Review page's "Sweep again").
@@ -165,51 +172,14 @@ final class TranscriptCleanupQueueManager: ObservableObject {
         isSweeping = true
         defer { isSweeping = false }
         let outcome = await TranscriptCleanupService.shared.resweepFromScratch()
-        await enqueueVerification(for: outcome.recordingIds)
         return outcome.flagged
     }
 
-    /// Find every recording with pending suggestions Gemma has never listened to and queue the
-    /// audio double-check for them. Runs on every maintenance tick when the verifier is present.
-    @MainActor
-    private func enqueueUnverifiedSuggestions() async {
-        guard TranscriptVerificationService.shared.isAvailable else { return }
-        let recordingIds: Set<Int64> = (try? GRDBDatabaseManager.shared.read { db in
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT recording_id, verifier_result FROM utterances
-                WHERE review_status = ? AND is_hidden = 0
-            """, arguments: [UtteranceReviewStatus.pendingReview.rawValue])
-            var ids: Set<Int64> = []
-            for row in rows {
-                // A line counts as unheard when its result JSON carries no real verdict
-                // (sweep flags, no_audio / projector errors, or nothing at all).
-                if TranscriptCleanupService.needsVerification(
-                    reviewStatus: UtteranceReviewStatus.pendingReview.rawValue,
-                    verifierResult: row["verifier_result"], force: false) {
-                    ids.insert(row["recording_id"])
-                }
-            }
-            return ids
-        }) ?? []
-        enqueueVerification(for: recordingIds)
-    }
-
-    /// Queue the Gemma double-check for recordings whose lines just got flagged, so the inbox
-    /// fills with VERDICTS instead of raw suspicions. Cheap no-op when the verifier is missing.
+    /// Compatibility no-op for older callers. Audio-model verification is deferred; the exemplar
+    /// sweep already writes uncertain findings directly to the human review inbox.
     @MainActor
     func enqueueVerification(for recordingIds: Set<Int64>) {
-        guard !recordingIds.isEmpty, TranscriptVerificationService.shared.isAvailable else { return }
-        let titles: [Int64: String] = (try? GRDBDatabaseManager.shared.read { db in
-            let questionMarks = recordingIds.map { _ in "?" }.joined(separator: ",")
-            let rows = try Row.fetchAll(db, sql: "SELECT id, title FROM recordings WHERE id IN (\(questionMarks))",
-                                        arguments: StatementArguments(Array(recordingIds)))
-            return Dictionary(uniqueKeysWithValues: rows.map { ($0["id"] as Int64, $0["title"] as String) })
-        }) ?? [:]
-        for recordingId in recordingIds {
-            enqueue(recordingId: recordingId,
-                    recordingTitle: titles[recordingId] ?? "Recording \(recordingId)",
-                    mode: .auto, priority: .normal)
-        }
+        _ = recordingIds
     }
 
     /// One-time back-teach: lines hidden BEFORE the exemplar memory existed (v25) never taught
@@ -244,20 +214,13 @@ final class TranscriptCleanupQueueManager: ObservableObject {
 
     /// Discover recordings never cleaned (`transcript_cleaned_at IS NULL`, with utterances) and
     /// enqueue them newest-first. The exemplar sweep runs on every tick regardless of the
-    /// toggle (it needs no GPU); the Gemma backfill below stays opt-in.
+    /// toggle (it needs no GPU); the full detector backfill below stays opt-in.
     @MainActor
     func performMaintenance() async {
         await runExemplarSweepNow()
 
-        // Auto-review: the LLM double-checks every suggestion that has never actually been
-        // heard (sweep flags, environmental failures). Ungated by the auto-clean toggle —
-        // reviewing suggestions automatically is the inbox's contract; the toggle only gates
-        // whole-library backfill below.
-        await enqueueUnverifiedSuggestions()
-
         guard !isPerformingMaintenance,
-              GlobalModelSettings.shared.autoCleanTranscripts,
-              TranscriptVerificationService.shared.isAvailable else { return }
+              GlobalModelSettings.shared.autoCleanTranscripts else { return }
         isPerformingMaintenance = true
         defer { isPerformingMaintenance = false }
 
@@ -301,8 +264,7 @@ final class TranscriptCleanupQueueManager: ObservableObject {
 
     // MARK: - Worker loop
 
-    private func processQueue() async {
-        await MainActor.run { isProcessing = true }
+    private func processQueue(generation: UUID) async {
         var gpuHeld = false
 
         while !Task.isCancelled {
@@ -334,6 +296,11 @@ final class TranscriptCleanupQueueManager: ObservableObject {
 
         if gpuHeld { await MainActor.run { GPUResourceManager.shared.release(.cleanup) } }
         await MainActor.run {
+            // A preempted worker may finish after its replacement has started. Never let that stale
+            // task clear the replacement's latch or visible state.
+            guard processingGeneration == generation else { return }
+            processingGeneration = nil
+            processingTask = nil
             isProcessing = false
             currentJob = nil
             currentStatus = ""
@@ -344,14 +311,9 @@ final class TranscriptCleanupQueueManager: ObservableObject {
         await MainActor.run { pendingJobs.first }
     }
 
-    /// On-disk size of what a verification span loads: the Gemma weights plus the audio
-    /// projector (nil → the gate's floor).
+    /// No heavyweight audio verifier is loaded while Gemma audio input is deferred.
     private func estimatedModelBytes() -> UInt64? {
-        let key = GlobalModelSettings.shared.selectedTextLLMModel
-        let model = SystemMemoryGate.fileSize(at: gemmaModels.getModelPath(for: key))
-        let mmproj = SystemMemoryGate.fileSize(at: gemmaModels.getMmprojPath(for: key))
-        if model == nil && mmproj == nil { return nil }
-        return (model ?? 0) + (mmproj ?? 0)
+        nil
     }
 
     private func processJob(_ job: TranscriptCleanupJob) async {

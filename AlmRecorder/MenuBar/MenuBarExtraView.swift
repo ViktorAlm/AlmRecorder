@@ -243,10 +243,7 @@ struct MenuBarExtraView: View {
             }
             return "Whisper: No model"
         case .llm:
-            switch modelSettings.selectedLLMEngine {
-            case .voxtral: return "Voxtral: \(modelSettings.selectedVoxtralTranscriptionModel)"
-            case .gemma: return "Gemma: \(modelSettings.selectedGemmaTranscriptionModel)"
-            }
+            return "Voxtral: \(modelSettings.selectedVoxtralTranscriptionModel)"
         case .vibeVoice:
             return "VibeVoice: \(modelSettings.selectedVibeVoiceQuantization.displayName)"
         }

@@ -1,6 +1,6 @@
 import Foundation
 import CoreML
-import AVFoundation
+@preconcurrency import AVFoundation
 import Accelerate
 
 /// Service for extracting speaker embeddings using Pyannote model via CoreML

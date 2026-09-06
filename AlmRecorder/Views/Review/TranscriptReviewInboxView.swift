@@ -1,10 +1,7 @@
 import SwiftUI
 
-/// The transcript-cleanup review inbox (mirrors SuggestedPeopleView): lines the detector or the
-/// Gemma audio verifier wasn't sure about land in "Needs review" with playback and Keep / Fix /
-/// Hide actions; "Auto-hidden" and "Auto-corrected" sections show what was applied automatically,
-/// each with one-click undo. Every action is recorded with user-level provenance, which the
-/// detector and verifier never overwrite.
+/// The transcript-cleanup review inbox: uncertain detector findings land in "Needs review" with
+/// playback and Keep / Fix / Hide actions. Every action is recorded with user-level provenance.
 struct TranscriptReviewInboxView: View {
 
     private struct ReviewItem: Identifiable {
@@ -26,10 +23,10 @@ struct TranscriptReviewInboxView: View {
     @State private var fixText = ""
 
     @StateObject private var player = QuotePlayerViewModel()
-    @ObservedObject private var audioHealth = LlamaAudioHealthMonitor.shared
     @ObservedObject private var settings = GlobalModelSettings.shared
     @ObservedObject private var cleanupQueue = TranscriptCleanupQueueManager.shared
     @State private var isSweeping = false
+    @State private var showReviewTools = false
     @State private var showAdvanced = false
     @ObservedObject private var reviewModel = ReviewInboxModel.shared
     private let utteranceRepo = GRDBUtteranceRepository()
@@ -37,12 +34,8 @@ struct TranscriptReviewInboxView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            tuningBar
+            reviewToolsDisclosure
             Divider()
-            if audioHealth.projectorFailure != nil,
-               let reason = TranscriptVerificationService.shared.projectorFailureReason {
-                projectorFailureBanner(reason)
-            }
             if isLoading && pending.isEmpty && autoHidden.isEmpty && autoCorrected.isEmpty {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -50,12 +43,12 @@ struct TranscriptReviewInboxView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         if !pending.isEmpty {
                             section("Needs review",
-                                    subtitle: "The audio check wasn't sure about these lines — listen and decide.",
+                                    subtitle: "The detector found uncertain lines — listen and decide.",
                                     items: pending) { pendingRow($0) }
                         }
                         if !autoCorrected.isEmpty {
                             section("Auto-corrected",
-                                    subtitle: "Rewritten from the audio with high confidence. Original is kept.",
+                                    subtitle: "Previously auto-corrected lines. The original is kept.",
                                     items: autoCorrected) { correctedRow($0) }
                         }
                         if !autoHidden.isEmpty {
@@ -84,13 +77,25 @@ struct TranscriptReviewInboxView: View {
         }
         .frame(minWidth: 560, minHeight: 480)
         .task { await reload() }
-        // Database-driven refresh: rows resolve live as Gemma verdicts land, the sweep flags
-        // lookalikes, or lines get trashed from any other surface.
-        .onChange(of: reviewModel.counts) { _ in
+        // Database-driven refresh: rows resolve live as sweeps flag lookalikes or users act.
+        .onChange(of: reviewModel.counts) {
             Task { await reload() }
         }
         .onDisappear { player.stop() }
         .sheet(item: $fixingItem) { item in fixSheet(item) }
+    }
+
+    private var reviewToolsDisclosure: some View {
+        DisclosureGroup(isExpanded: $showReviewTools) {
+            tuningBar
+                .padding(.top, 8)
+        } label: {
+            Label("Review tools", systemImage: "slider.horizontal.3")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Header
@@ -111,11 +116,8 @@ struct TranscriptReviewInboxView: View {
     }
 
     /// Sweep sensitivity + actions: the master slider applies a preset to ALL four similarity
-    /// thresholds (strict = surgical, eager = wide net for Gemma/you to sort); the Advanced
-    /// disclosure exposes each threshold individually. "Sweep again" re-runs the lookalike
-    /// sweep from scratch at the current thresholds. Pending suggestions are ALSO queued for
-    /// the Gemma double-check automatically on every maintenance tick — the button just skips
-    /// the wait.
+    /// thresholds (strict = surgical, eager = wide net for you to sort); the Advanced disclosure
+    /// exposes each threshold individually. "Sweep again" re-runs the lookalike sweep.
     private var tuningBar: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
@@ -123,7 +125,7 @@ struct TranscriptReviewInboxView: View {
                 Slider(value: $settings.sweepSensitivity, in: 0...2, step: 1)
                     .frame(width: 130)
                     .help("How aggressively learned hallucinations match similar lines")
-                    .onChange(of: settings.sweepSensitivity) { newValue in
+                    .onChange(of: settings.sweepSensitivity) { _, newValue in
                         settings.applySweepPreset(newValue)
                     }
                 Text(sensitivityLabel)
@@ -145,17 +147,6 @@ struct TranscriptReviewInboxView: View {
                 .help("Clear unactioned suggestions and re-match the library at the current thresholds")
 
                 Spacer()
-
-                Button {
-                    let recordings = Set(pending.map(\.utterance.recordingId))
-                    TranscriptCleanupQueueManager.shared.enqueueVerification(for: recordings)
-                } label: {
-                    Label("Verify now", systemImage: "waveform.and.mic")
-                }
-                .disabled(pending.isEmpty || !TranscriptVerificationService.shared.isAvailable)
-                .help(TranscriptVerificationService.shared.isAvailable
-                      ? "Suggestions are verified automatically in the background — this skips the wait"
-                      : "Needs the Gemma audio model (Models tab)")
 
                 if cleanupQueue.isProcessing, !cleanupQueue.currentStatus.isEmpty {
                     ProgressView().scaleEffect(0.5)
@@ -184,8 +175,6 @@ struct TranscriptReviewInboxView: View {
             }
             .frame(maxWidth: 560, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
     }
 
     private func thresholdSlider(_ title: String, value: Binding<Double>,
@@ -211,26 +200,6 @@ struct TranscriptReviewInboxView: View {
         case .eager: return "Eager"
         default: return "Custom"
         }
-    }
-
-    /// Shown while the llama runtime provably cannot load the current audio projector: every
-    /// flagged line skips the audio check and lands here unverified, and the user should know why.
-    private func projectorFailureBanner(_ reason: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Audio verification is unavailable").font(.caption.bold())
-                Text("The Gemma audio projector failed to load (\(reason)). Lines below were not checked against the audio — this usually means the app's bundled llama.cpp is older than the model files.")
-                    .font(.caption).foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-        }
-        .padding(10)
-        .background(Color.orange.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
     }
 
     // MARK: - Sections
@@ -576,18 +545,17 @@ struct TranscriptReviewInboxView: View {
         return (heard?.isEmpty == false) ? heard : nil
     }
 
-    /// Short chip label for a failed/never-run audio check. Lines whose result JSON carries an
-    /// error and no verdict are re-queued automatically — say so instead of a dead-end "failed".
+    /// Short chip label for legacy verification state and current human-review routing.
     private func verifierError(_ utterance: Utterance) -> String? {
         guard let error = verifierPayload(utterance)?["error"] as? String else { return nil }
         switch error {
         case "no_audio": return "audio missing"
-        case "verifier_unavailable": return "Gemma model needed"
-        case "projector_failed": return "audio check unavailable"
+        case "audio_verification_deferred": return "needs your review"
+        case "verifier_unavailable", "projector_failed": return "legacy audio check unavailable"
         default:
             return error.localizedCaseInsensitiveContains("cancel")
-                ? "check interrupted — retrying"
-                : "check failed — retrying"
+                ? "legacy check interrupted"
+                : "needs your review"
         }
     }
 

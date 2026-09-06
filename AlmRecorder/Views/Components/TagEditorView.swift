@@ -25,10 +25,17 @@ struct TagEditorView: View {
                             .fill(colorFromHex(tag.color))
                             .frame(width: 8, height: 8)
                         Button(action: { editingTag = tag; editDescription = tag.description ?? "" }) {
-                            Text(tag.name)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
+                            HStack(spacing: 3) {
+                                Text(tag.name)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                if tag.hidesRecordingsFromMCP {
+                                    Image(systemName: "network.slash")
+                                        .font(.system(size: 8, weight: .semibold))
+                                        .foregroundStyle(.orange)
+                                }
+                            }
                         }
                         .buttonStyle(.plain)
                         Button(action: { removeTag(tag) }) {
@@ -77,6 +84,11 @@ struct TagEditorView: View {
             TextField("What this tag means", text: $editDescription)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { saveDescription(for: tag); editingTag = nil }
+            if tag.hidesRecordingsFromMCP {
+                Label("Recordings with this tag are hidden from MCP", systemImage: "shield.lefthalf.filled")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             HStack {
                 Spacer()
                 Button("Save") {

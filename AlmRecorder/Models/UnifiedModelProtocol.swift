@@ -231,7 +231,7 @@ class UnifiedModelCatalog {
                 filename: config.mmprojFile,
                 downloadURL: URL(string: config.mmprojURL)!,
                 localPath: VoxtralConfiguration.modelsDirectory.appendingPathComponent(config.mmprojFile),
-                sizeInBytes: 100_000_000 // Approximate 100MB for mmproj files
+                sizeInBytes: Int64(config.mmprojSizeGB * 1_000_000_000)
             )
             
             return UnifiedModel(

@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."   # project root
 APP="build/AlmRecorder.app"
 
 echo "🔨 swift build (debug)..."
-swift build
+swift build --jobs "${ALMREC_BUILD_JOBS:-2}"
 
 echo "📁 Assembling $APP ..."
 rm -rf "$APP"
@@ -18,8 +18,19 @@ cp .build/debug/AlmRecorderMCPBridge "$APP/Contents/MacOS/AlmRecorderMCPBridge"
 chmod +x "$APP/Contents/MacOS/AlmRecorderMCPBridge"
 cp AlmRecorder/Info.plist "$APP/Contents/Info.plist"
 cp AlmRecorder/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"   # Dock/Finder icon (CFBundleIconFile)
-# Note: the app uses SF Symbols / system colors (no Bundle.module), and resolves
-# vectorlite/whisper/llama via absolute dev paths, so no resource bundle is needed here.
+cp AlmRecorder/Assets.xcassets/MenuBarIcon.imageset/menubar.pdf \
+   "$APP/Contents/Resources/MenuBarIcon.pdf"
+mkdir -p "$APP/Contents/Resources/Python"
+cp -R AlmRecorder/Resources/Python/. "$APP/Contents/Resources/Python/"
+mkdir -p "$APP/Contents/Resources/Binaries" "$APP/Contents/Resources/Libraries" \
+    "$APP/Contents/Resources/Models" "$APP/Contents/Resources/Licenses"
+cp -R AlmRecorder/Resources/Binaries/. "$APP/Contents/Resources/Binaries/"
+cp -R AlmRecorder/Resources/Libraries/. "$APP/Contents/Resources/Libraries/"
+cp -R AlmRecorder/Resources/Models/. "$APP/Contents/Resources/Models/"
+cp -R AlmRecorder/Resources/Licenses/. "$APP/Contents/Resources/Licenses/"
+# Keep the development app self-contained too. In particular, Gemma audio consensus needs the
+# exact llama-server and matching dylibs built from this checkout; falling through to a globally
+# installed llama.cpp can silently change its multimodal request contract.
 
 # Bundle the one dynamic framework the binary loads via @rpath (GRDB), and point an rpath at it.
 mkdir -p "$APP/Contents/Frameworks"
@@ -30,10 +41,18 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/Mac
 # importantly Screen Recording / System Audio for ScreenCaptureKit — across rebuilds. Ad-hoc
 # signing changes identity every build, which silently detaches those grants. Falls back to
 # ad-hoc only if no stable identity exists.
-IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development|Developer ID/{print $2; exit}')
+IDENTITY=""
+if [ "${ALMREC_ADHOC_SIGN:-0}" != "1" ]; then
+  IDENTITY=$(security find-identity -v -p codesigning \
+    | awk '/Apple Development|Developer ID/{gsub(/[()]/, "", $2); print $2; exit}')
+fi
 if [ -n "$IDENTITY" ]; then
-  echo "✍️  Signing with stable identity: $IDENTITY"
+  echo "✍️  Signing with valid stable identity: $IDENTITY"
   codesign --force --deep --sign "$IDENTITY" "$APP"
+  if ! codesign --verify --deep "$APP" >/dev/null 2>&1; then
+    echo "⚠️  The selected certificate is not trusted by macOS — falling back to ad-hoc signing"
+    codesign --force --deep --sign - "$APP"
+  fi
 else
   echo "✍️  No stable identity found — signing ad-hoc (Screen Recording grant resets each build)"
   codesign --force --deep --sign - "$APP"

@@ -102,10 +102,11 @@ ENV/
 temp/
 tmp/
 
-# ---- Privacy boundary: never track tests, evals, or user-derived corpora ----
-# Test and evaluation source stays local because fixtures can accidentally retain transcript,
-# speaker, filename, calendar, or identity data. Product evaluation code reads each user's own
-# labels/gold set from the local database; those inputs and outputs are never repository assets.
+# ---- Privacy boundary: never track private tests, evals, or user-derived corpora ----
+# Reviewed synthetic regression tests live in DeveloperTests/. All tests and evaluation material
+# that can contain transcripts, speakers, filenames, calendar data, or identities stays in the
+# ignored paths below. Product evaluation code reads each user's own labels/gold set from the local
+# database; those inputs and outputs are never repository assets.
 /Tests/
 /AlmRecorder/Tests/
 /.local-eval/
@@ -122,6 +123,8 @@ tmp/
 # Local-only extraction/benchmark utilities and internal work notes.
 /Scripts/extract_speaker_test_set.py
 /Scripts/run_speaker_pipeline_eval.sh
+/Scripts/tmp_ecapa/
+/Scripts/tmp_wespeaker/
 /docs/dev-notes/
 /docs/plans/
 /docs/superpowers/

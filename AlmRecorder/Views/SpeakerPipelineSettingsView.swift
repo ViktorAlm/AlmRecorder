@@ -4,6 +4,7 @@ import SwiftUI
 /// benchmark names remain reproducible; choosing Custom exposes the underlying knobs.
 struct SpeakerPipelineSettingsView: View {
     @ObservedObject private var settings = SpeakerPipelineSettings.shared
+    @State private var showGlobalComparison = false
 
     var body: some View {
         Form {
@@ -27,6 +28,15 @@ struct SpeakerPipelineSettingsView: View {
             }
 
             Section("Evaluation") {
+                Button {
+                    showGlobalComparison = true
+                } label: {
+                    Label(
+                        "Compare global speaker steps…",
+                        systemImage: "rectangle.split.2x2"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
                 Text("Legacy, Balanced, Highest accuracy, and Targeted Sortformer can be run against the same confirmed test set. Reports include diarization error, word-level speaker error, speaker-count error, identity precision/recall, runtime, and real-time factor. Multi-speaker clips are quarantined from identity scoring.")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -34,9 +44,26 @@ struct SpeakerPipelineSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Section("Continuous global identity") {
+                Toggle(
+                    "Reconcile voices after new recordings",
+                    isOn: $settings.continuousReconciliationEnabled
+                )
+                Text(
+                    "Uses your private calibration labels and held-out safety labels to merge "
+                        + "and split automatic People assignments. It writes only when the safety "
+                        + "set has zero false merges, and every run can be undone in Evaluation."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()
+        .sheet(isPresented: $showGlobalComparison) {
+            GlobalSpeakerComparisonView()
+        }
     }
 
     @ViewBuilder

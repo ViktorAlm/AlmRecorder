@@ -196,12 +196,9 @@ class DashboardViewModel: ObservableObject {
             guard let variant = settings.selectedWhisperVariant else { return true }
             return !WhisperModelManager.shared.isModelDownloaded(variant)
         case .llm:
-            switch settings.selectedLLMEngine {
-            case .voxtral:
-                return !VoxtralModelManager().isModelDownloaded(settings.selectedVoxtralTranscriptionModel)
-            case .gemma:
-                return !GemmaModelManager().isModelDownloaded(settings.selectedGemmaTranscriptionModel)
-            }
+            return !VoxtralModelManager().isModelDownloaded(
+                settings.selectedVoxtralTranscriptionModel
+            )
         case .vibeVoice:
             return !VibeVoiceModelManager.shared.isModelDownloaded(
                 settings.selectedVibeVoiceQuantization

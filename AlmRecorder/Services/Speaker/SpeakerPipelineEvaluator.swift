@@ -102,6 +102,9 @@ struct SpeakerIdentityBenchmarkDecision: Codable, Equatable {
     let eligibleForGlobalIdentity: Bool
     let mixtureSplitGain: Float?
     let mixtureCentroidSimilarity: Float?
+    /// Saved local turn spans make benchmark artifacts inspectable call by call. Older artifacts
+    /// omit them and remain readable.
+    var spans: [SpeakerIdentityTimeSpan]? = nil
 }
 
 /// Label-invariant metrics shared by unit tests, live benchmarks, and exported test sets.

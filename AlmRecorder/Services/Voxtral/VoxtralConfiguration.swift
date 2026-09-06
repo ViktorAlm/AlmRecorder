@@ -8,6 +8,7 @@ struct VoxtralModelConfig {
     let modelURL: String
     let mmprojURL: String
     let sizeGB: Double
+    let mmprojSizeGB: Double
 }
 
 /// Central configuration for Voxtral services
@@ -21,33 +22,37 @@ struct VoxtralConfiguration {
             name: "Voxtral Mini 3B Q4_K_M",
             modelFile: "mistralai_Voxtral-Mini-3B-2507-Q4_K_M.gguf",
             mmprojFile: "mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
-            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mistralai_Voxtral-Mini-3B-2507-Q4_K_M.gguf",
-            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
-            sizeGB: 2.47
+            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mistralai_Voxtral-Mini-3B-2507-Q4_K_M.gguf",
+            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
+            sizeGB: 2.47,
+            mmprojSizeGB: 1.329
         ),
         "Q5_K_M": VoxtralModelConfig(
             name: "Voxtral Mini 3B Q5_K_M", 
             modelFile: "mistralai_Voxtral-Mini-3B-2507-Q5_K_M.gguf",
             mmprojFile: "mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
-            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mistralai_Voxtral-Mini-3B-2507-Q5_K_M.gguf",
-            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
-            sizeGB: 2.87
+            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mistralai_Voxtral-Mini-3B-2507-Q5_K_M.gguf",
+            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
+            sizeGB: 2.87,
+            mmprojSizeGB: 1.329
         ),
         "Q8_0": VoxtralModelConfig(
             name: "Voxtral Mini 3B Q8_0 (8-bit)",
             modelFile: "mistralai_Voxtral-Mini-3B-2507-Q8_0.gguf",
             mmprojFile: "mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
-            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mistralai_Voxtral-Mini-3B-2507-Q8_0.gguf",
-            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
-            sizeGB: 4.27
+            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mistralai_Voxtral-Mini-3B-2507-Q8_0.gguf",
+            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mmproj-mistralai_Voxtral-Mini-3B-2507-f16.gguf",
+            sizeGB: 4.27,
+            mmprojSizeGB: 1.329
         ),
         "BF16": VoxtralModelConfig(
             name: "Voxtral Mini 3B BF16 (Full Precision)",
             modelFile: "mistralai_Voxtral-Mini-3B-2507-BF16.gguf",
             mmprojFile: "mmproj-mistralai_Voxtral-Mini-3B-2507-bf16.gguf",
-            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mistralai_Voxtral-Mini-3B-2507-BF16.gguf",
-            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/main/mmproj-mistralai_Voxtral-Mini-3B-2507-bf16.gguf",
-            sizeGB: 8.04
+            modelURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mistralai_Voxtral-Mini-3B-2507-BF16.gguf",
+            mmprojURL: "https://huggingface.co/bartowski/mistralai_Voxtral-Mini-3B-2507-GGUF/resolve/1d0032d997b7f72804d356fc790486e6d697cea5/mmproj-mistralai_Voxtral-Mini-3B-2507-bf16.gguf",
+            sizeGB: 8.04,
+            mmprojSizeGB: 1.329
         )
     ]
     

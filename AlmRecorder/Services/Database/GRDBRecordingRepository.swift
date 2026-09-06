@@ -15,14 +15,16 @@ class GRDBRecordingRepository {
                 guard let data = try? JSONEncoder().encode(metadata) else { return nil }
                 return String(data: data, encoding: .utf8)
             }
+            let provenanceJSON = Self.provenanceJSON(recording.transcriptionProvenance)
             
             try db.execute(
                 sql: """
                     INSERT INTO recordings (
                         title, file_name, file_path, duration, language,
                         created_at, transcribed_at, source, full_transcript, metadata,
-                        external_id, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        external_id, updated_at, mcp_access_enabled,
+                        transcription_provenance_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 arguments: [
                     recording.title,
@@ -36,7 +38,9 @@ class GRDBRecordingRepository {
                     recording.fullTranscript,
                     metadataJSON,
                     recording.externalId ?? "rec_\(UUID().uuidString.lowercased())",
-                    recording.updatedAt ?? recording.createdAt
+                    recording.updatedAt ?? recording.createdAt,
+                    recording.mcpAccessEnabled,
+                    provenanceJSON
                 ]
             )
             
@@ -53,6 +57,21 @@ class GRDBRecordingRepository {
                 arguments: [id]
             )
             
+            return row.flatMap { Recording(row: $0) }
+        }
+    }
+
+    /// Get a recording by its exact `file_name` (unlike `getByFileNamePrefix`, no partial match).
+    /// `file_name` is UNIQUE, so a transcription pipeline that's about to INSERT a new row for a
+    /// discovered file must check this first — a prior attempt (even one that only got as far as
+    /// an empty/placeholder transcript before failing) can already hold that file_name.
+    func getByFileName(_ fileName: String) throws -> Recording? {
+        try db.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM recordings WHERE file_name = ?",
+                arguments: [fileName]
+            )
             return row.flatMap { Recording(row: $0) }
         }
     }
@@ -77,6 +96,67 @@ class GRDBRecordingRepository {
                 sql: "UPDATE recordings SET file_path = ? WHERE id = ?",
                 arguments: [newPath, id]
             )
+        }
+    }
+
+    func mcpPrivacyStatus(id: Int64) throws -> MCPRecordingPrivacyStatus? {
+        try db.read { db in
+            guard let enabled = try Bool.fetchOne(
+                db,
+                sql: "SELECT mcp_access_enabled FROM recordings WHERE id = ?",
+                arguments: [id]
+            ) else {
+                return nil
+            }
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT t.*
+                    FROM tags t
+                    JOIN recording_tags rt ON rt.tag_id = t.id
+                    WHERE rt.recording_id = ?
+                      AND t.mcp_hidden = 1
+                    ORDER BY LOWER(t.name)
+                """,
+                arguments: [id]
+            )
+            return MCPRecordingPrivacyStatus(
+                recordingAllowsAccess: enabled,
+                blockingTags: rows.compactMap(Tag.init(row:))
+            )
+        }
+    }
+
+    func mcpAvailabilityCounts() throws -> (available: Int, hidden: Int) {
+        try db.read { db in
+            let total = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM recordings"
+            ) ?? 0
+            let available = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)
+                """
+            ) ?? 0
+            return (available: available, hidden: max(0, total - available))
+        }
+    }
+
+    func setMCPAccessEnabled(id: Int64, enabled: Bool) throws {
+        try db.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE recordings
+                    SET mcp_access_enabled = ?, updated_at = ?
+                    WHERE id = ? AND mcp_access_enabled <> ?
+                """,
+                arguments: [enabled, Date(), id, enabled]
+            )
+            if db.changesCount > 0 {
+                MCPPrivacyRevisionStore.shared.invalidate()
+            }
         }
     }
 
@@ -199,6 +279,7 @@ class GRDBRecordingRepository {
             guard let data = try? JSONEncoder().encode(metadata) else { return nil }
             return String(data: data, encoding: .utf8)
         }
+        let provenanceJSON = Self.provenanceJSON(recording.transcriptionProvenance)
 
         try db.execute(
             sql: """
@@ -212,6 +293,7 @@ class GRDBRecordingRepository {
                     source = ?,
                     full_transcript = ?,
                     metadata = ?,
+                    transcription_provenance_json = ?,
                     updated_at = ?
                 WHERE id = ?
             """,
@@ -225,10 +307,19 @@ class GRDBRecordingRepository {
                 recording.source.rawValue,
                 recording.fullTranscript,
                 metadataJSON,
+                provenanceJSON,
                 Date(),
                 id
             ]
         )
+    }
+
+    private static func provenanceJSON(
+        _ provenance: RecordingTranscriptionProvenance?
+    ) -> String? {
+        provenance
+            .flatMap { try? JSONEncoder().encode($0) }
+            .flatMap { String(data: $0, encoding: .utf8) }
     }
     
     /// Delete a recording
@@ -609,6 +700,16 @@ extension Recording {
             .flatMap { try? JSONDecoder().decode(SpeakerPipelineConfiguration.self, from: $0) }
         self.externalId = row["external_id"]
         self.updatedAt = row["updated_at"]
+        self.mcpAccessEnabled = row["mcp_access_enabled"] ?? true
+        let provenanceJSON: String? = row["transcription_provenance_json"]
+        self.transcriptionProvenance = provenanceJSON
+            .flatMap { $0.data(using: .utf8) }
+            .flatMap {
+                try? JSONDecoder().decode(
+                    RecordingTranscriptionProvenance.self,
+                    from: $0
+                )
+            }
 
         // Parse metadata JSON if present
         let metadataJSON: String? = row["metadata"]

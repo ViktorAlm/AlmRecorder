@@ -80,7 +80,7 @@ class EmbeddingModelManager: ObservableObject {
             name: "Qwen3 0.6B Q8_0",
             description: "8-bit quantized, high quality with good performance",
             modelFile: "Qwen3-Embedding-0.6B-Q8_0.gguf",
-            downloadURL: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf",
+            downloadURL: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-Q8_0.gguf",
             sizeInMB: 639,
             ramRequiredMB: 800,
             dimensions: 1024,  // Actual dimension for 0.6B model
@@ -94,7 +94,7 @@ class EmbeddingModelManager: ObservableObject {
             name: "Qwen3 0.6B F16",
             description: "Full 16-bit precision, highest quality",
             modelFile: "Qwen3-Embedding-0.6B-f16.gguf",
-            downloadURL: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-f16.gguf",
+            downloadURL: "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-f16.gguf",
             sizeInMB: 1200,
             ramRequiredMB: 1400,
             dimensions: 1024,  // Actual dimension for 0.6B model
@@ -140,9 +140,10 @@ class EmbeddingModelManager: ObservableObject {
                 }
             }
             
-            // Auto-select or download default model
-            Task {
-                await ensureDefaultModel()
+            // Select an already-installed default, but never start a network transfer merely
+            // because this singleton was initialized during app launch.
+            if isModelDownloaded(Self.defaultModelId) {
+                try? selectModel(Self.defaultModelId)
             }
         }
     }
@@ -186,11 +187,13 @@ class EmbeddingModelManager: ObservableObject {
             return false
         }
         
-        // Validate file size (must be at least 10MB for a valid model)
+        // Reject partial model files left by interrupted or proxied downloads.
         if let attributes = try? fileManager.attributesOfItem(atPath: modelPath.path),
            let size = attributes[.size] as? Int64 {
-            // Models should be at least 10MB
-            return size > 10_000_000
+            return UnifiedDownloadQueue.isAcceptableFileSize(
+                size,
+                declaredSize: Int64(model.sizeInMB * 1_000_000)
+            )
         }
         
         return false
@@ -237,11 +240,11 @@ class EmbeddingModelManager: ObservableObject {
         }
         
         // For compatibility with async/await pattern, wait for download
-        await waitForDownload(modelId)
+        try await waitForDownload(modelId)
     }
     
     /// Wait for a model to finish downloading
-    private func waitForDownload(_ modelId: String) async {
+    private func waitForDownload(_ modelId: String) async throws {
         let maxWaitTime: TimeInterval = 3600 // 1 hour
         let checkInterval: TimeInterval = 1.0
         let startTime = Date()
@@ -266,8 +269,13 @@ class EmbeddingModelManager: ObservableObject {
                             isDownloading = false
                             downloadProgress = 0.0
                         }
-                        return
+                        throw task.error
+                            ?? EmbeddingError.downloadFailed("Model download failed")
+                    } else if task.state == .cancelled {
+                        throw EmbeddingError.downloadFailed("Model download was cancelled")
                     }
+                } else if Date().timeIntervalSince(startTime) >= 5 {
+                    throw EmbeddingError.downloadFailed("Download task was not created")
                 }
             }
             
@@ -279,8 +287,9 @@ class EmbeddingModelManager: ObservableObject {
             }
             
             // Wait before checking again
-            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            try await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
         }
+        throw EmbeddingError.downloadFailed("Model download timed out")
     }
     
     /// Delete a model

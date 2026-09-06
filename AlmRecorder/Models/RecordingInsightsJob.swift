@@ -4,12 +4,13 @@ import Foundation
 /// The transcript is NOT stored on the job — the worker re-fetches it from the recording at process
 /// time, so re-transcription is always reflected and persistence stays small.
 struct RecordingInsightsJob: Identifiable, Codable {
-    let id = UUID()
+    // These values must remain stable when a persisted job is decoded.
+    var id = UUID()
     let recordingId: Int64
     let recordingTitle: String
     let force: Bool
     let priority: Priority
-    let createdAt = Date()
+    var createdAt = Date()
 
     var status: JobStatus = .pending
     var startedAt: Date?

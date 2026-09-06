@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">AlmRecorder ribbon A with Yeti-inspired crossbar</title>
+  <desc id="description">
+    A balanced speech-ribbon A whose crossbar is a compact horizontal studio
+    microphone with a rounded grille, blue body, and side control.
+  </desc>
+
+  <!--
+    Voice: #859477
+    Transcript: #252824
+    Microphone accent: #466A7A
+    Recommended light background: #F4F0E6
+  -->
+
+  <g shape-rendering="geometricPrecision">
+    <!-- Equal-weight 104 px diagonal ribbons. -->
+    <path
+      id="voice-ribbon"
+      d="
+        M132 778
+        H168
+        C192 778 208 760 220 736
+        L241 695
+        C251 675 269 672 283 691
+        L303 718
+        C317 737 343 731 351 708
+        L496 264
+        C506 233 532 212 565 212
+        H604
+      "
+      fill="none"
+      stroke="#859477"
+      stroke-width="104"
+      stroke-linecap="butt"
+      stroke-linejoin="round"
+    />
+
+    <!-- Slate-blue microphone body; the right end disappears into the A. -->
+    <path
+      id="microphone-body"
+      fill="#466A7A"
+      d="
+        M526 558
+        H780
+        V618
+        H526
+        C514 618 504 608 504 596
+        V580
+        C504 568 514 558 526 558
+        Z
+      "
+    />
+
+    <!-- Oversized rounded mesh grille, inspired by a desktop condenser mic. -->
+    <path
+      id="microphone-grille"
+      fill="#252824"
+      fill-rule="evenodd"
+      d="
+        M466 542
+        H540
+        V634
+        H466
+        A46 46 0 0 1 466 542
+        Z
+
+        M470 565
+        A8 8 0 0 1 478 573
+        V603
+        A8 8 0 0 1 462 603
+        V573
+        A8 8 0 0 1 470 565
+        Z
+
+        M494 565
+        A8 8 0 0 1 502 573
+        V603
+        A8 8 0 0 1 486 603
+        V573
+        A8 8 0 0 1 494 565
+        Z
+
+        M518 565
+        A8 8 0 0 1 526 573
+        V603
+        A8 8 0 0 1 510 603
+        V573
+        A8 8 0 0 1 518 565
+        Z
+      "
+    />
+
+    <!-- The compact yoke and twin pivots carry the Yeti-like desktop silhouette. -->
+    <path
+      id="microphone-yoke"
+      d="
+        M538 536
+        H566
+        C590 536 608 555 608 578
+        V598
+        C608 621 590 640 566 640
+        H538
+      "
+      fill="none"
+      stroke="#466A7A"
+      stroke-width="16"
+      stroke-linecap="round"
+    />
+    <circle cx="542" cy="542" r="11" fill="#466A7A" />
+    <circle cx="542" cy="634" r="11" fill="#466A7A" />
+
+    <!-- One understated front control. -->
+    <circle cx="642" cy="588" r="10" fill="#F4F0E6" />
+
+    <path
+      id="transcript-ribbon"
+      d="M604 212 L822 778"
+      fill="none"
+      stroke="#252824"
+      stroke-width="104"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </g>
+</svg>

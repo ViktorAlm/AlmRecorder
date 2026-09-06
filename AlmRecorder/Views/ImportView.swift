@@ -14,13 +14,11 @@ struct ImportView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
-            
-            Divider()
-            
             if importer.voiceMemos.isEmpty {
                 emptyState
             } else {
+                toolbar
+                Divider()
                 fileList
             }
             
@@ -136,7 +134,7 @@ struct ImportView: View {
                 .font(.title2)
                 .foregroundColor(.secondary)
             
-            Text("Select your Voice Memos folder or import audio files")
+            Text("Drop audio files here, choose files, or connect Apple Voice Memos")
                 .foregroundColor(.secondary)
             
             HStack(spacing: 20) {
@@ -191,8 +189,9 @@ struct ImportView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(style: StrokeStyle(lineWidth: 2, dash: [5]))
-                .foregroundColor(dragOver ? .blue : .clear)
+                .foregroundColor(dragOver ? .blue : .secondary.opacity(0.25))
                 .animation(.easeInOut, value: dragOver)
+                .padding(20)
         )
     }
     

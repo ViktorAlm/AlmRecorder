@@ -206,7 +206,7 @@ struct SuggestedPeopleView: View {
     private func rerun() {
         isRerunning = true
         Task {
-            await Task.detached { _ = coordinator.recompute() }.value
+            await Task.detached { _ = IdentityInferenceCoordinator.shared.recompute() }.value
             await reload()
             isRerunning = false
         }

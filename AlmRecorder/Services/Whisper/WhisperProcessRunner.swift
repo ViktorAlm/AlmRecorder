@@ -1,9 +1,19 @@
 import Foundation
 
+private struct WhisperProcessOutput {
+    let text: String
+    let detectedLanguage: String?
+    let detectedLanguageConfidence: Float?
+}
+
 /// Handles execution of whisper-cli process
-class WhisperProcessRunner {
+final class WhisperProcessRunner: @unchecked Sendable {
     
-    private var currentProcess: Process?
+    private let currentProcessState = LockedValue<Process?>(nil)
+    private var currentProcess: Process? {
+        get { currentProcessState.snapshot }
+        set { currentProcessState.withValue { $0 = newValue } }
+    }
     private let whisperPath: String
     private let logger = VoxtralLogger.shared
     
@@ -36,7 +46,7 @@ class WhisperProcessRunner {
         prompt: String? = nil,
         progressHandler: ((String) -> Void)? = nil
     ) async throws -> String {
-        try await runTranscriptionCore(
+        let result = try await runTranscriptionCore(
             modelPath: modelPath,
             audioPath: audioPath,
             language: language,
@@ -46,6 +56,7 @@ class WhisperProcessRunner {
             jsonOutputBase: nil,
             progressHandler: progressHandler
         )
+        return result.text
     }
 
     /// Like `runTranscription`, but also captures whisper's per-token probabilities via a
@@ -65,7 +76,7 @@ class WhisperProcessRunner {
         let sidecarPath = base + ".json"
         defer { try? FileManager.default.removeItem(atPath: sidecarPath) }
 
-        let text = try await runTranscriptionCore(
+        let coreResult = try await runTranscriptionCore(
             modelPath: modelPath,
             audioPath: audioPath,
             language: language,
@@ -78,9 +89,11 @@ class WhisperProcessRunner {
 
         var tokenStats: WhisperTokenStats? = nil
         var timedSegments: [WhisperTimedSegment] = []
+        var sidecarLanguage: String?
         if let sidecarData = FileManager.default.contents(atPath: sidecarPath) {
             tokenStats = WhisperJSONParser.parseStats(sidecarData)
             timedSegments = WhisperJSONParser.parseTimedSegments(sidecarData) ?? []
+            sidecarLanguage = WhisperJSONParser.parseDetectedLanguage(sidecarData)
             if tokenStats == nil {
                 logger.warning("[WhisperProcessRunner] JSON sidecar present but yielded no token stats (\(sidecarData.count) bytes)")
             }
@@ -88,9 +101,11 @@ class WhisperProcessRunner {
             logger.warning("[WhisperProcessRunner] JSON sidecar missing at \(sidecarPath) — proceeding without token stats")
         }
         return WhisperDetailedTranscription(
-            text: text,
+            text: coreResult.text,
             tokenStats: tokenStats,
-            timedSegments: timedSegments
+            timedSegments: timedSegments,
+            detectedLanguage: sidecarLanguage ?? coreResult.detectedLanguage,
+            detectedLanguageConfidence: coreResult.detectedLanguageConfidence
         )
     }
 
@@ -103,7 +118,7 @@ class WhisperProcessRunner {
         prompt: String?,
         jsonOutputBase: String?,
         progressHandler: ((String) -> Void)?
-    ) async throws -> String {
+    ) async throws -> WhisperProcessOutput {
 
         // Validate paths
         guard FileManager.default.fileExists(atPath: whisperPath) else {
@@ -195,7 +210,6 @@ class WhisperProcessRunner {
         process.environment = environment
         
         logger.info("[WhisperProcessRunner] DYLD_LIBRARY_PATH: \(dyldPath)")
-        logger.info("[WhisperProcessRunner] Full environment: \(environment.map { "\($0.key)=\($0.value)" }.joined(separator: ", "))")
         
         // Verify libraries exist
         let missingLibs = libraryPaths.filter { !FileManager.default.fileExists(atPath: $0) }
@@ -218,18 +232,18 @@ class WhisperProcessRunner {
         }
         
         // Prepare to capture output
-        var outputData = Data()
-        var errorData = Data()
+        let outputBuffer = LockedValue(Data())
+        let errorBuffer = LockedValue(Data())
         
         // Set up handlers to read output as it comes
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            outputData.append(data)
+            outputBuffer.withValue { $0.append(data) }
         }
         
         errorPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            errorData.append(data)
+            errorBuffer.withValue { $0.append(data) }
             
             // Parse progress from stderr
             if let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty {
@@ -262,15 +276,19 @@ class WhisperProcessRunner {
             try await awaitWhisperExitOrReap(process, audioPath: audioPath, label: "transcription")
 
             // Read any remaining data
-            outputData.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
-            errorData.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            outputBuffer.withValue {
+                $0.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
+            }
+            errorBuffer.withValue {
+                $0.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            }
             
             let terminationStatus = process.terminationStatus
             logger.info("[WhisperProcessRunner] Process exited with status: \(terminationStatus)")
             
             // Convert output to string
-            let output = String(data: outputData, encoding: .utf8) ?? ""
-            let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+            let output = String(data: outputBuffer.snapshot, encoding: .utf8) ?? ""
+            let errorOutput = String(data: errorBuffer.snapshot, encoding: .utf8) ?? ""
             
             // Log output for debugging
             if !output.isEmpty {
@@ -332,7 +350,12 @@ class WhisperProcessRunner {
             errorPipe.fileHandleForReading.readabilityHandler = nil
             currentProcess = nil
             
-            return transcript
+            let languageDetection = WhisperJSONParser.parseDetectedLanguageLog(errorOutput)
+            return WhisperProcessOutput(
+                text: transcript,
+                detectedLanguage: languageDetection?.code,
+                detectedLanguageConfidence: languageDetection?.confidence
+            )
             
         } catch let error as TranscriptionError {
             // Cleanup after process completion

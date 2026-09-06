@@ -39,14 +39,19 @@ struct TagSuggestion: Decodable {
 ///
 /// Voxtral is intentionally NOT used here: it is a 3B audio-specialized model and a poor text LLM.
 /// Text features default to Gemma (`GlobalModelSettings.selectedTextLLMModel`).
-class LLMTextService {
+final class LLMTextService: @unchecked Sendable {
     static let shared = LLMTextService()
 
     private let logger = VoxtralLogger.shared
     private let modelManager = GemmaModelManager()
     private let binaryPath: String?
     private let queue = DispatchQueue(label: "com.almrecorder.llmtext", qos: .userInitiated)
-    private var currentProcess: Process?
+    private let processLock = NSLock()
+    private var _currentProcess: Process?
+    private var currentProcess: Process? {
+        get { processLock.withLock { _currentProcess } }
+        set { processLock.withLock { _currentProcess = newValue } }
+    }
 
     /// Hard cap on transcript characters fed to the model so a long recording can't overflow context.
     private let maxTranscriptChars = 12_000
@@ -71,7 +76,12 @@ class LLMTextService {
     // MARK: - Public API
 
     /// Run the selected Gemma model on a text prompt and return the cleaned completion.
-    func generateText(prompt: String, modelKey: String? = nil, maxTokens: Int? = nil) async throws -> String {
+    func generateText(
+        prompt: String,
+        modelKey: String? = nil,
+        maxTokens: Int? = nil,
+        jsonSchema: String? = nil
+    ) async throws -> String {
         let key = modelKey ?? GlobalModelSettings.shared.selectedTextLLMModel
         guard let modelPath = modelManager.getModelPath(for: key) else {
             logger.error("[LLMText] Text model not downloaded: \(key)")
@@ -81,7 +91,17 @@ class LLMTextService {
             logger.error("[LLMText] llama-completion not found")
             throw TranscriptionError.llamaCppNotFound
         }
-        return try await runProcess(binaryPath: binaryPath, modelPath: modelPath.path, prompt: prompt, maxTokens: maxTokens)
+        let profile = TranscriptionResourceProfile.gemmaText(key)
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(profile: profile) {
+            throw TranscriptionError.resourcesUnavailable(deferral.reason)
+        }
+        return try await runProcess(
+            binaryPath: binaryPath,
+            modelPath: modelPath.path,
+            prompt: prompt,
+            maxTokens: maxTokens,
+            jsonSchema: jsonSchema
+        )
     }
 
     /// Summary + topics + tags for a transcript in one model load. Falls back to a keyword heuristic
@@ -191,7 +211,13 @@ class LLMTextService {
 
     // MARK: - Process
 
-    private func runProcess(binaryPath: String, modelPath: String, prompt: String, maxTokens: Int?) async throws -> String {
+    private func runProcess(
+        binaryPath: String,
+        modelPath: String,
+        prompt: String,
+        maxTokens: Int?,
+        jsonSchema: String?
+    ) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             queue.async { [weak self] in
                 guard let self = self else {
@@ -211,10 +237,14 @@ class LLMTextService {
                     "--temp", GemmaConfiguration.textParameters.temperature,
                     "--top-p", GemmaConfiguration.textParameters.topP,
                     "--top-k", GemmaConfiguration.textParameters.topK,
+                    "--reasoning", "off",
                     "-n", String(maxTokens ?? Int(GemmaConfiguration.textParameters.maxTokens) ?? 1024),
                     "-c", "\(self.contextLength)",
                     "--no-warmup",
                 ]
+                if let jsonSchema, !jsonSchema.isEmpty {
+                    process.arguments?.append(contentsOf: ["--json-schema", jsonSchema])
+                }
 
                 // Resolve the matching ggml/llama dylibs for a bundled binary.
                 LlamaRuntime.applyLibraryPath(to: process, binaryPath: binaryPath)

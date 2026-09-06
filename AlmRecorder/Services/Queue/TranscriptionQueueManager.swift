@@ -2,6 +2,61 @@ import Foundation
 import Combine
 import GRDB
 
+/// Successful jobs intentionally disappear from the visible queue immediately. Keep a small,
+/// one-shot handoff cache so callers waiting on a specific job can still receive its result after
+/// the UI removal happens between polling ticks.
+struct TerminalTranscriptionJobCache {
+    private var jobs: [UUID: TranscriptionJob] = [:]
+    private var insertionOrder: [UUID] = []
+    let capacity: Int
+
+    init(capacity: Int = 64) {
+        self.capacity = max(1, capacity)
+    }
+
+    mutating func store(_ job: TranscriptionJob) {
+        jobs[job.id] = job
+        insertionOrder.removeAll { $0 == job.id }
+        insertionOrder.append(job.id)
+        while insertionOrder.count > capacity {
+            jobs.removeValue(forKey: insertionOrder.removeFirst())
+        }
+    }
+
+    mutating func take(_ id: UUID) -> TranscriptionJob? {
+        insertionOrder.removeAll { $0 == id }
+        return jobs.removeValue(forKey: id)
+    }
+}
+
+enum TranscriptionCheckpointRouting {
+    static func reusable(
+        _ checkpoint: TranscriptionCheckpoint?,
+        for backend: TranscriptionBackend?
+    ) -> TranscriptionCheckpoint? {
+        guard let checkpoint else { return nil }
+        switch backend {
+        case .whisper where checkpoint.backend == nil || checkpoint.backend == .whisper:
+            return checkpoint
+        case .vibeVoice where checkpoint.backend == .vibeVoice:
+            return checkpoint
+        case nil where checkpoint.backend == nil:
+            // Before engine snapshots/checkpoint tags, only Whisper created checkpoints.
+            return checkpoint
+        default:
+            return nil
+        }
+    }
+}
+
+enum TranscriptionProgressAccounting {
+    /// A progress estimate may lag a durable chunk callback while a malformed pass is subdivided.
+    /// Completed work must never move backward in the UI or persistence.
+    static func completedChunks(current: Int, reported: Int) -> Int {
+        max(current, max(0, reported))
+    }
+}
+
 /// Global queue manager for all transcription jobs
 @MainActor
 class TranscriptionQueueManager: ObservableObject {
@@ -79,6 +134,8 @@ class TranscriptionQueueManager: ObservableObject {
     // Worker management
     private var workers: [TranscriptionWorker] = []
     private let workerQueue = DispatchQueue(label: "com.almrecorder.queue.workers", attributes: .concurrent)
+    private var memoryRetryNotBefore: [UUID: Date] = [:]
+    private var terminalJobCache = TerminalTranscriptionJobCache()
     
     // MARK: - Init
     
@@ -137,8 +194,7 @@ class TranscriptionQueueManager: ObservableObject {
     }
     
     private func setupNotifications() {
-        // TODO: Set up download completion notifications from UnifiedDownloadQueue
-        // For now, we'll poll the download queue status
+        // The maintenance monitor polls UnifiedDownloadQueue and requeues jobs once their model is ready.
     }
     
     private func checkForNextJob() {
@@ -218,6 +274,7 @@ class TranscriptionQueueManager: ObservableObject {
                 )
                 completedJob.status = .completed
                 completedJob.completedAt = Date()
+                completedJob.recordingId = recordings.first?.id
                 return completedJob
             }
         } catch {
@@ -239,9 +296,8 @@ class TranscriptionQueueManager: ObservableObject {
             case .whisper:
                 job.requiredModel = modelSettings.selectedWhisperVariant?.displayName
             case .llm:
-                job.requiredModel = modelSettings.selectedLLMEngine == .gemma
-                    ? modelSettings.selectedGemmaTranscriptionModel
-                    : modelSettings.selectedVoxtralTranscriptionModel
+                // Gemma audio transcription is deferred; the LLM ASR backend is Voxtral-only.
+                job.requiredModel = modelSettings.selectedVoxtralTranscriptionModel
             case .vibeVoice:
                 job.requiredModel = modelSettings.selectedVibeVoiceQuantization.repositoryID
             }
@@ -325,9 +381,7 @@ class TranscriptionQueueManager: ObservableObject {
         case .whisper:
             job.requiredModel = modelSettings.selectedWhisperVariant?.displayName
         case .llm:
-            job.requiredModel = modelSettings.selectedLLMEngine == .gemma
-                ? modelSettings.selectedGemmaTranscriptionModel
-                : modelSettings.selectedVoxtralTranscriptionModel
+            job.requiredModel = modelSettings.selectedVoxtralTranscriptionModel
         case .vibeVoice:
             job.requiredModel = modelSettings.selectedVibeVoiceQuantization.repositoryID
         }
@@ -383,7 +437,7 @@ class TranscriptionQueueManager: ObservableObject {
         priority: TranscriptionJob.Priority = .normal,
         requiredModel: String? = nil,
         runSettings: RunSettings? = nil,
-        timeout: TimeInterval = 300 // 5 minutes default
+        timeout: TimeInterval? = nil
     ) async -> (TranscriptionItem, TranscriptionResult?, Int64?) {
         
         // Add the job with specified priority
@@ -396,77 +450,98 @@ class TranscriptionQueueManager: ObservableObject {
             runSettings: runSettings
         )
         
+        if let immediateResult = Self.waitResult(for: job) {
+            return immediateResult
+        }
         let jobId = job.id
         let startTime = Date()
         
-        // Poll for completion
-        while Date().timeIntervalSince(startTime) < timeout {
+        // Poll for completion. Production queue work can legitimately wait for safe memory and a
+        // long local model can take far beyond ten minutes, so the default has no wall-clock
+        // timeout. A caller that truly needs a deadline can still provide one explicitly.
+        while !Task.isCancelled,
+              timeout.map({ Date().timeIntervalSince(startTime) < $0 }) ?? true {
             // Check job status
             if let currentJob = jobs.first(where: { $0.id == jobId }) {
-                switch currentJob.status {
-                case .completed:
-                    // Get the transcription result from the job
-                    let transcriptionItem = TranscriptionItem(
-                        fileName: currentJob.fileName,
-                        filePath: currentJob.audioFilePath,
-                        transcript: currentJob.transcript ?? "",
-                        language: "auto-detected",
-                        duration: currentJob.duration ?? 0,
-                        fileSize: currentJob.fileSize ?? 0,
-                        createdDate: currentJob.createdAt,
-                        transcribedDate: currentJob.completedAt ?? Date(),
-                        source: currentJob.source,
-                        status: .completed,
-                        error: nil
-                    )
-                    
-                    // Return the actual TranscriptionResult and recordingId stored in the job
-                    return (transcriptionItem, currentJob.transcriptionResult, currentJob.recordingId)
-                    
-                case .failed, .cancelled:
-                    // Return failed item
-                    let transcriptionItem = TranscriptionItem(
-                        fileName: currentJob.fileName,
-                        filePath: currentJob.audioFilePath,
-                        transcript: "",
-                        language: "auto-detected",
-                        duration: currentJob.duration ?? 0,
-                        fileSize: currentJob.fileSize ?? 0,
-                        createdDate: currentJob.createdAt,
-                        transcribedDate: Date(),
-                        source: currentJob.source,
-                        status: .failed,
-                        error: currentJob.error
-                    )
-                    return (transcriptionItem, nil, nil)
-                    
-                default:
-                    // Still processing, wait a bit
-                    try? await Task.sleep(for: .milliseconds(250))
+                if let result = Self.waitResult(for: currentJob) {
+                    return result
                 }
+                try? await Task.sleep(for: .milliseconds(250))
+            } else if let completedJob = terminalJobCache.take(jobId),
+                      let result = Self.waitResult(for: completedJob) {
+                logger.info(
+                    "[QueueManager] Delivered terminal snapshot to waiter: "
+                        + completedJob.fileName
+                )
+                return result
             } else {
-                // Job disappeared? This shouldn't happen
                 logger.error("[QueueManager] Job \(jobId) disappeared from queue")
                 break
             }
         }
         
-        // Timeout occurred
+        let waitFailure: String
+        if Task.isCancelled {
+            waitFailure = "Transcription wait cancelled"
+        } else if let timeout {
+            waitFailure = "Transcription timeout after \(Int(timeout)) seconds"
+        } else {
+            waitFailure = "Transcription job disappeared before completion"
+        }
         let transcriptionItem = TranscriptionItem(
             fileName: fileName ?? URL(fileURLWithPath: audioFile).lastPathComponent,
             filePath: audioFile,
             transcript: "",
-            language: "auto-detected",
+            language: "unknown",
             duration: 0,
             fileSize: 0,
             createdDate: Date(),
             transcribedDate: Date(),
             source: source,
             status: .failed,
-            error: "Transcription timeout after \(Int(timeout)) seconds"
+            error: waitFailure
         )
         
         return (transcriptionItem, nil, nil)
+    }
+
+    static func waitResult(
+        for job: TranscriptionJob
+    ) -> (TranscriptionItem, TranscriptionResult?, Int64?)? {
+        switch job.status {
+        case .completed:
+            let item = TranscriptionItem(
+                fileName: job.fileName,
+                filePath: job.audioFilePath,
+                transcript: job.transcript ?? "",
+                language: job.transcriptionResult?.language ?? "unknown",
+                duration: job.duration ?? 0,
+                fileSize: job.fileSize ?? 0,
+                createdDate: job.createdAt,
+                transcribedDate: job.completedAt ?? Date(),
+                source: job.source,
+                status: .completed,
+                error: nil
+            )
+            return (item, job.transcriptionResult, job.recordingId)
+        case .failed, .cancelled:
+            let item = TranscriptionItem(
+                fileName: job.fileName,
+                filePath: job.audioFilePath,
+                transcript: "",
+                language: "unknown",
+                duration: job.duration ?? 0,
+                fileSize: job.fileSize ?? 0,
+                createdDate: job.createdAt,
+                transcribedDate: job.completedAt ?? Date(),
+                source: job.source,
+                status: .failed,
+                error: job.error
+            )
+            return (item, nil, nil)
+        default:
+            return nil
+        }
     }
     
     /// Add multiple jobs to the queue
@@ -1075,7 +1150,7 @@ class TranscriptionQueueManager: ObservableObject {
             fileName: job.fileName,
             filePath: job.audioFilePath,
             transcript: transcript,
-            language: "auto-detected",
+            language: job.transcriptionResult?.language ?? "unknown",
             duration: job.duration ?? 0,
             fileSize: job.fileSize ?? 0,
             createdDate: job.createdAt,
@@ -1104,6 +1179,10 @@ class TranscriptionQueueManager: ObservableObject {
                 guard !Task.isCancelled else { break }
                 
                 await MainActor.run {
+                    // Wake jobs that were parked while their model downloaded. Without this,
+                    // successful downloads left the jobs stuck in waitingForModel indefinitely.
+                    self.checkForCompletedModelDownloads()
+
                     // Clean up stuck jobs automatically
                     self.cleanupStuckJobs()
                     
@@ -1313,7 +1392,7 @@ class TranscriptionQueueManager: ObservableObject {
     /// Delete a job from persistence
     private func deletePersistedJob(_ jobId: UUID) {
         do {
-            try database.writeQueue { db in
+            _ = try database.writeQueue { db in
                 try PersistentTranscriptionJob
                     .filter(PersistentTranscriptionJob.Columns.id == jobId.uuidString)
                     .deleteAll(db)
@@ -1350,15 +1429,27 @@ class TranscriptionQueueManager: ObservableObject {
     /// Start heartbeat timer for crash detection
     private func startHeartbeatTimer() {
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: heartbeatInterval, repeats: true) { [weak self] _ in
-            self?.updateHeartbeats()
+            Task { @MainActor [weak self] in
+                self?.updateHeartbeats()
+            }
         }
     }
     
     /// Update heartbeats for all active jobs
     private func updateHeartbeats() {
-        let activeJobs = jobs.filter { $0.status == .processing }
-        
-        for job in activeJobs {
+        let now = Date()
+        let activeJobIDs = jobs.indices.filter { jobs[$0].status == .processing }
+
+        for index in activeJobIDs {
+            // `cleanupStuckJobs()` checks the in-memory queue, not the persisted row. Previously
+            // this timer updated only SQLite, so every quiet backend pass looked stale after 60s
+            // even while its worker and child process were healthy.
+            jobs[index].lastHeartbeat = now
+            let job = jobs[index]
+            if currentJob?.id == job.id {
+                currentJob = job
+            }
+
             do {
                 try database.writeQueue { db in
                     try PersistentTranscriptionJob.updateHeartbeat(
@@ -1428,13 +1519,50 @@ class TranscriptionQueueManager: ObservableObject {
 
         // Scheduled nightly jobs remain durable and visible during the day, but workers may only
         // claim them inside their snapshotted window. A job already processing is allowed to finish.
-        if let nextJob = pendingJobs.first(where: {
+        guard let candidate = pendingJobs.first(where: {
             $0.runSettings.schedulingPolicy?.allows() ?? true
-        }) {
-            return nextJob
+        }) else {
+            return nil
         }
+        if let retryAt = memoryRetryNotBefore[candidate.id], retryAt > Date() {
+            return nil
+        }
+        let profile = TranscriptionResourceProfile.forSelection(
+            candidate.runSettings.engineSelection
+        )
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: profile
+        ) {
+            setMemoryWaitingMessage(
+                jobID: candidate.id,
+                reason: deferral.reason
+            )
+            memoryRetryNotBefore[candidate.id] = Date().addingTimeInterval(
+                deferral.retryAfter
+            )
+            return nil
+        }
+        memoryRetryNotBefore[candidate.id] = nil
+        clearMemoryWaitingMessage(jobID: candidate.id)
+        return candidate
+    }
 
-        return nil
+    private func setMemoryWaitingMessage(jobID: UUID, reason: String) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let message = "Waiting for safe memory · \(reason)"
+        guard jobs[index].progressMessage != message else { return }
+        jobs[index].progressPhase = .waiting
+        jobs[index].progressMessage = message
+        persistJob(jobs[index])
+    }
+
+    private func clearMemoryWaitingMessage(jobID: UUID) {
+        guard let index = jobs.firstIndex(where: { $0.id == jobID }),
+              jobs[index].progressMessage.hasPrefix("Waiting for safe memory") else {
+            return
+        }
+        jobs[index].progressMessage = ""
+        persistJob(jobs[index])
     }
     
     /// Mark job as processing (called by worker)
@@ -1514,9 +1642,11 @@ class TranscriptionQueueManager: ObservableObject {
                     Task.detached(priority: .utility) { _ = await MeetingAssembler.assembleIfReady(stamp: stamp) }
                 }
 
-                // Publish the final snapshot before removing it. Durable batch coordinators cannot
+                // Publish/cache the final snapshot before removing it. Durable batch coordinators cannot
                 // infer completion from `jobs` because successful work intentionally disappears.
-                jobCompleted.send(jobs[index])
+                let completedJob = jobs[index]
+                terminalJobCache.store(completedJob)
+                jobCompleted.send(completedJob)
 
                 // Remove completed job from active queue immediately
                 // This prevents it from showing in the queue UI
@@ -1551,7 +1681,10 @@ class TranscriptionQueueManager: ObservableObject {
                 jobs[index].totalChunks = totalChunks
             }
             if let completedChunks = completedChunks {
-                jobs[index].completedChunks = completedChunks
+                jobs[index].completedChunks = TranscriptionProgressAccounting.completedChunks(
+                    current: jobs[index].completedChunks,
+                    reported: completedChunks
+                )
             }
             if let currentChunkProgress = currentChunkProgress {
                 jobs[index].currentChunkProgress = currentChunkProgress
@@ -1606,6 +1739,34 @@ class TranscriptionQueueManager: ObservableObject {
                 logger.error("[QueueManager] Job failed: \(jobs[index].fileName) - \(error)")
                 jobFailed.send(jobs[index])
             }
+        }
+    }
+
+    /// A model launch was proactively refused or an in-flight model was stopped as memory became
+    /// unsafe. Preserve the job and retry budget; workers will claim it automatically when the
+    /// strict admission check passes again.
+    func deferJobForResources(_ jobId: UUID, reason: String) async {
+        await MainActor.run {
+            guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
+            jobs[index].status = .pending
+            jobs[index].progress = 0
+            jobs[index].progressPhase = .waiting
+            jobs[index].progressMessage = "Waiting for safe memory · \(reason)"
+            jobs[index].workerId = nil
+            jobs[index].startedAt = nil
+            jobs[index].lastHeartbeat = nil
+            jobs[index].error = nil
+            memoryRetryNotBefore[jobId] = Date().addingTimeInterval(30)
+            persistJob(jobs[index])
+            if currentJob?.id == jobId {
+                currentJob = nil
+            }
+            processingCount = jobs.filter { $0.status == .processing }.count
+            updateActiveWorkerCount()
+            updateGlobalProgress()
+            logger.warning(
+                "[QueueManager] Deferred \(jobs[index].fileName) without consuming retry: \(reason)"
+            )
         }
     }
     
@@ -1726,7 +1887,7 @@ class TranscriptionQueueManager: ObservableObject {
         let cutoffDate = Date().addingTimeInterval(-7 * 24 * 60 * 60) // 7 days ago
         
         do {
-            try database.writeQueue { db in
+            _ = try database.writeQueue { db in
                 try PersistentTranscriptionJob
                     .filter(PersistentTranscriptionJob.Columns.status == "completed")
                     .filter(PersistentTranscriptionJob.Columns.completedAt < cutoffDate)
@@ -1801,7 +1962,21 @@ class TranscriptionWorker {
     /// Process a single job
     private func process(_ job: TranscriptionJob) async {
         currentJob = job
-        
+
+        let resourceProfile = TranscriptionResourceProfile.forSelection(
+            job.runSettings.engineSelection
+        )
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: resourceProfile
+        ) {
+            await queueManager?.deferJobForResources(
+                job.id,
+                reason: deferral.reason
+            )
+            currentJob = nil
+            return
+        }
+
         // Notify queue manager that this job is being processed
         await queueManager?.markJobProcessing(job.id, workerId: id)
         
@@ -1819,23 +1994,53 @@ class TranscriptionWorker {
                 )
             }
             
-            // Set up checkpoint on WhisperService so it can skip already-processed chunks
+            // Set up a backend-tagged checkpoint so Whisper VAD chunks and VibeVoice outer
+            // windows can resume safely without ever interpreting one another's persisted data.
             let whisperService = WhisperService.shared
-            whisperService.activeCheckpoint = job.checkpointData
-            var runningCheckpoint = job.checkpointData ?? .empty
+            let vibeVoiceService = VibeVoiceService.shared
+            let selectedBackend = job.runSettings.engineSelection?.backend
+            let reusableCheckpoint = TranscriptionCheckpointRouting.reusable(
+                job.checkpointData,
+                for: selectedBackend
+            )
+            whisperService.activeCheckpoint = (
+                selectedBackend == .whisper || selectedBackend == nil
+            ) ? reusableCheckpoint : nil
+            vibeVoiceService.activeCheckpoint = selectedBackend == .vibeVoice
+                ? reusableCheckpoint
+                : nil
+            var runningCheckpoint = reusableCheckpoint ?? .empty
 
             whisperService.onVADChunkCompleted = { [weak self] vadIndex, chunks, offset in
-                runningCheckpoint.processedChunks.append(vadIndex)
+                runningCheckpoint.backend = .whisper
+                if !runningCheckpoint.processedChunks.contains(vadIndex) {
+                    runningCheckpoint.processedChunks.append(vadIndex)
+                }
                 runningCheckpoint.chunkTranscripts[vadIndex] = chunks.map {
-                    TranscriptionCheckpoint.ChunkResult(
-                        text: $0.text,
-                        startTime: $0.startTime,
-                        endTime: $0.endTime,
-                        speaker: $0.speaker,
-                        speakerUUID: $0.speakerUUID
-                    )
+                    TranscriptionCheckpoint.ChunkResult(chunk: $0)
                 }
                 runningCheckpoint.chunkOffsets[vadIndex] = offset
+                runningCheckpoint.lastProcessedTime = Date()
+                await self?.queueManager?.saveCheckpoint(job.id, checkpoint: runningCheckpoint)
+            }
+            vibeVoiceService.onWindowCompleted = { [weak self] windowIndex, chunks, offset in
+                runningCheckpoint.backend = .vibeVoice
+                if !runningCheckpoint.processedChunks.contains(windowIndex) {
+                    runningCheckpoint.processedChunks.append(windowIndex)
+                }
+                runningCheckpoint.chunkTranscripts[windowIndex] = chunks.map {
+                    TranscriptionCheckpoint.ChunkResult(chunk: $0)
+                }
+                runningCheckpoint.chunkOffsets[windowIndex] = offset
+                runningCheckpoint.lastProcessedTime = Date()
+                await self?.queueManager?.saveCheckpoint(job.id, checkpoint: runningCheckpoint)
+            }
+            vibeVoiceService.onWindowRecoveryDepthIncreased = {
+                [weak self] windowIndex, recoveryDepth in
+                runningCheckpoint.backend = .vibeVoice
+                var depths = runningCheckpoint.vibeVoiceRecoveryDepths ?? [:]
+                depths[windowIndex] = max(depths[windowIndex] ?? 0, recoveryDepth)
+                runningCheckpoint.vibeVoiceRecoveryDepths = depths
                 runningCheckpoint.lastProcessedTime = Date()
                 await self?.queueManager?.saveCheckpoint(job.id, checkpoint: runningCheckpoint)
             }
@@ -1845,6 +2050,9 @@ class TranscriptionWorker {
             guard await GPUResourceManager.shared.acquire(.transcription) else {
                 whisperService.activeCheckpoint = nil
                 whisperService.onVADChunkCompleted = nil
+                vibeVoiceService.activeCheckpoint = nil
+                vibeVoiceService.onWindowCompleted = nil
+                vibeVoiceService.onWindowRecoveryDepthIncreased = nil
                 currentJob = nil
                 return
             }
@@ -1853,6 +2061,24 @@ class TranscriptionWorker {
             // holder — leaking it would park every other queue until relaunch.
             var gpuHeld = true
             defer { if gpuHeld { Task { @MainActor in GPUResourceManager.shared.release(.transcription) } } }
+
+            // Memory can change while waiting for another GPU consumer to release. Re-sample at
+            // the last safe point before any backend is allowed to map model weights.
+            if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+                profile: resourceProfile
+            ) {
+                whisperService.activeCheckpoint = nil
+                whisperService.onVADChunkCompleted = nil
+                vibeVoiceService.activeCheckpoint = nil
+                vibeVoiceService.onWindowCompleted = nil
+                vibeVoiceService.onWindowRecoveryDepthIncreased = nil
+                await queueManager?.deferJobForResources(
+                    job.id,
+                    reason: deferral.reason
+                )
+                currentJob = nil
+                return
+            }
 
             // Use UnifiedTranscriptionManager to perform transcription with progress
             let unifiedManager = UnifiedTranscriptionManager.shared
@@ -1873,6 +2099,24 @@ class TranscriptionWorker {
             // Clear checkpoint state after transcription (success or failure)
             whisperService.activeCheckpoint = nil
             whisperService.onVADChunkCompleted = nil
+            vibeVoiceService.activeCheckpoint = nil
+            vibeVoiceService.onWindowCompleted = nil
+            vibeVoiceService.onWindowRecoveryDepthIncreased = nil
+
+            if let resourceFailure = unifiedManager.consumeLastResourceFailure() {
+                let reason: String
+                switch resourceFailure {
+                case .gpuOutOfMemory:
+                    reason = "model hit its memory limit; cooling down before retry"
+                case .resourcesUnavailable(let detail):
+                    reason = detail
+                default:
+                    reason = resourceFailure.localizedDescription
+                }
+                await queueManager?.deferJobForResources(job.id, reason: reason)
+                currentJob = nil
+                return
+            }
 
             // Check if transcription failed
             if transcriptionItem.status == .failed {

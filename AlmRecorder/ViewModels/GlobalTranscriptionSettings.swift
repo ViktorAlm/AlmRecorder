@@ -157,7 +157,7 @@ class GlobalTranscriptionSettings: ObservableObject {
         // If not using custom settings, return default
         guard useCustomSettings else {
             if let customPrompt = customPrompt {
-                var settings = RunSettings.defaultSettings
+                let settings = RunSettings.defaultSettings
                 return RunSettings(
                     temperature: settings.temperature,
                     topK: settings.topK,

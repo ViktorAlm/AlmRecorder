@@ -6,23 +6,21 @@ struct ModelManagerView: View {
     @State private var selectedModel = VoxtralConfiguration.defaultModel
     @State private var showingError = false
     @State private var errorMessage = ""
-    @State private var isInstalling = false
     @State private var showingCleanup = false
     @State private var diskUsage: (used: Int64, available: Int64) = (0, 0)
     @State private var selectedTab = "transcription"
     private let focusGemmaText: Bool
 
-    /// `focusGemmaText: true` opens straight to LLM → Gemma (where the text model that powers AI summaries
-    /// and profiles lives) instead of the default Whisper tab — so the profile's "Get Gemma…" button lands
-    /// in the right place instead of dumping the user on the Whisper models.
+    /// `focusGemmaText: true` opens the text-only Gemma model tab.
     init(focusGemmaText: Bool = false) {
         self.focusGemmaText = focusGemmaText
+        _selectedTab = State(initialValue: focusGemmaText ? "summary" : "transcription")
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
             // Transcription Models Tab (Whisper & Voxtral)
-            TranscriptionModelsView(openToLLMGemma: focusGemmaText)
+            TranscriptionModelsView()
                 .tabItem {
                     Label("Transcription", systemImage: "waveform.badge.mic")
                 }
@@ -188,13 +186,8 @@ struct ModelManagerView: View {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.yellow)
-                    Text("llama.cpp not found")
+                    Text("Bundled llama.cpp runtime missing — reinstall AlmRecorder")
                         .font(.caption)
-                    
-                    Button("Install") {
-                        installLlamaCpp()
-                    }
-                    .font(.caption)
                 }
             }
             
@@ -211,24 +204,6 @@ struct ModelManagerView: View {
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
-                    showingError = true
-                }
-            }
-        }
-    }
-    
-    private func installLlamaCpp() {
-        isInstalling = true
-        Task {
-            do {
-                try await voxtralService.installLlamaCpp()
-                await MainActor.run {
-                    isInstalling = false
-                }
-            } catch {
-                await MainActor.run {
-                    isInstalling = false
-                    errorMessage = "Failed to install llama.cpp. Please install manually:\nbrew install llama.cpp"
                     showingError = true
                 }
             }
@@ -404,7 +379,6 @@ struct ModelOptionRow: View {
 struct TranscriptionModelsView: View {
     @StateObject private var whisperManager = WhisperModelManager.shared
     @StateObject private var voxtralService = VoxtralCppService()
-    @StateObject private var gemmaService = GemmaCppService()
     @StateObject private var vibeVoiceManager = VibeVoiceModelManager.shared
     @StateObject private var modelSettings = GlobalModelSettings.shared
     // Observe the download queue so model rows reflect live download state (was read
@@ -418,15 +392,9 @@ struct TranscriptionModelsView: View {
     @State private var selectedSize: WhisperModelSize = .large
     @State private var selectedVersion: WhisperModelVersion? = .v3
 
-    /// When true, open on the LLM backend and select the Gemma engine (see `ModelManagerView.focusGemmaText`).
-    private let openToLLMGemma: Bool
-
-    init(openToLLMGemma: Bool = false) {
-        self.openToLLMGemma = openToLLMGemma
+    init() {
         _selectedBackend = State(
-            initialValue: openToLLMGemma
-                ? .llm
-                : GlobalModelSettings.shared.transcriptionBackend
+            initialValue: GlobalModelSettings.shared.transcriptionBackend
         )
     }
 
@@ -468,19 +436,7 @@ struct TranscriptionModelsView: View {
                         // Show download progress for Whisper models
                         DownloadProgressView()
                     } else if selectedBackend == .llm {
-                        // LLM engine sub-picker (Voxtral or Gemma)
-                        Picker("Engine", selection: $modelSettings.selectedLLMEngine) {
-                            Text("Voxtral").tag(LLMEngine.voxtral)
-                            Text("Gemma").tag(LLMEngine.gemma)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 240)
-
-                        if modelSettings.selectedLLMEngine == .gemma {
-                            gemmaModelsList
-                        } else {
-                            voxtralModelsList
-                        }
+                        voxtralModelsList
                     } else {
                         VibeVoiceModelsView()
                     }
@@ -505,10 +461,6 @@ struct TranscriptionModelsView: View {
             .cornerRadius(8)
         }
         .padding()
-        .onAppear {
-            // Opened via "Get Gemma…": land on the Gemma engine sub-tab (selectedBackend is already .llm).
-            if openToLLMGemma { modelSettings.selectedLLMEngine = .gemma }
-        }
     }
 
     private var whisperModelSection: some View {
@@ -541,7 +493,7 @@ struct TranscriptionModelsView: View {
                     }
                 }
                 .pickerStyle(SegmentedPickerStyle())
-                .onChange(of: selectedFamily) { newFamily in
+                .onChange(of: selectedFamily) { _, newFamily in
                     // Reset version if switching to KBLab
                     if newFamily == .kblab {
                         selectedVersion = nil
@@ -837,65 +789,6 @@ struct TranscriptionModelsView: View {
         }
     }
     
-    private var gemmaModelsList: some View {
-        VStack(spacing: 12) {
-            ForEach(Array(gemmaService.availableModels.keys.sorted()), id: \.self) { key in
-                if let model = gemmaService.availableModels[key] {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(model.name)
-                                .fontWeight(.medium)
-
-                            Text("\(String(format: "%.1f", model.sizeGB)) GB + BF16 projector")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        Spacer()
-
-                        gemmaModelActions(key: key)
-                    }
-                    .padding()
-                    .cardSurface()
-                }
-            }
-        }
-        .padding()
-    }
-
-    @ViewBuilder
-    private func gemmaModelActions(key: String) -> some View {
-        if gemmaService.isModelDownloaded(key) {
-            if modelSettings.selectedLLMEngine == .gemma && modelSettings.selectedGemmaTranscriptionModel == key {
-                Button("Selected") {}
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(true)
-            } else {
-                Button("Select") {
-                    modelSettings.selectedGemmaTranscriptionModel = key
-                    modelSettings.selectedLLMEngine = .gemma
-                    modelSettings.transcriptionBackend = .llm
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        } else if downloadQueue.isInQueue("gemma-\(key)") {
-            HStack(spacing: 4) {
-                ProgressView().scaleEffect(0.7)
-                Text("Downloading")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        } else {
-            Button("Download") {
-                Task { try? await gemmaService.downloadModel(quantization: key) }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-        }
-    }
-
     private var voxtralModelsList: some View {
         VStack(spacing: 12) {
             ForEach(Array(voxtralService.availableModels.keys.sorted()), id: \.self) { key in
@@ -948,12 +841,7 @@ struct TranscriptionModelsView: View {
                 return "Whisper: No model selected"
             }
         case .llm:
-            switch modelSettings.selectedLLMEngine {
-            case .voxtral:
-                return "Voxtral: \(modelSettings.selectedVoxtralTranscriptionModel)"
-            case .gemma:
-                return "Gemma: \(modelSettings.selectedGemmaTranscriptionModel)"
-            }
+            return "Voxtral: \(modelSettings.selectedVoxtralTranscriptionModel)"
         case .vibeVoice:
             return "VibeVoice: \(modelSettings.selectedVibeVoiceQuantization.displayName)"
         }
@@ -963,8 +851,8 @@ struct TranscriptionModelsView: View {
 // MARK: - Summary Models View
 
 struct SummaryModelsView: View {
-    @StateObject private var gemmaService = GemmaCppService()
     @StateObject private var modelSettings = GlobalModelSettings.shared
+    @StateObject private var gemmaModels = GemmaModelManager()
     
     var body: some View {
         VStack(spacing: 20) {
@@ -978,7 +866,7 @@ struct SummaryModelsView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 
-                Text("Gemma models for summaries, topics, and tags")
+                Text("Gemma models for summaries and audio-grounded transcript consensus")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -988,8 +876,8 @@ struct SummaryModelsView: View {
             // Model list
             ScrollView {
                 VStack(spacing: 12) {
-                    ForEach(Array(gemmaService.availableModels.keys.sorted()), id: \.self) { key in
-                        if let model = gemmaService.availableModels[key] {
+                    ForEach(Array(GemmaConfiguration.models.keys.sorted()), id: \.self) { key in
+                        if let model = GemmaConfiguration.models[key] {
                             HStack {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(model.name)
@@ -1010,6 +898,24 @@ struct SummaryModelsView: View {
                                 }
                                 
                                 Spacer()
+
+                                let audioCapable = GemmaConfiguration
+                                    .isAudioConsensusModel(key)
+                                let installed = audioCapable
+                                    ? gemmaModels.isAudioModelDownloaded(key)
+                                    : gemmaModels.isModelDownloaded(key)
+                                if !installed {
+                                    Button("Download") {
+                                        Task { try? await gemmaModels.downloadModel(key) }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    .disabled(gemmaModels.isDownloading)
+                                } else if audioCapable {
+                                    Label("Audio ready", systemImage: "waveform.circle.fill")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.green)
+                                }
                                 
                                 if modelSettings.selectedTextLLMModel == key {
                                     Button("Selected") {
@@ -1053,7 +959,7 @@ struct SummaryModelsView: View {
                 Toggle("Auto-generate summaries after transcription", isOn: $modelSettings.autoGenerateSummaries)
                     .font(.caption)
 
-                Toggle("Clean up transcripts after transcription (verify suspicious lines against audio)", isOn: $modelSettings.autoCleanTranscripts)
+                Toggle("Flag suspicious transcript lines for review", isOn: $modelSettings.autoCleanTranscripts)
                     .font(.caption)
             }
             .padding()

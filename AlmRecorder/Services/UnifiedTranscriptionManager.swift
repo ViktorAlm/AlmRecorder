@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AVFoundation
 import GRDB
+import NaturalLanguage
 
 /// Unified manager for all transcription operations in the app
 /// This ensures consistent handling of transcriptions from any source
@@ -19,10 +20,15 @@ class UnifiedTranscriptionManager: ObservableObject {
     private let transcriptionService = TranscriptionService()
     private let whisperService = WhisperService.shared
     private let voxtralService = VoxtralCppService()
-    private let gemmaService = GemmaCppService()
     private let vibeVoiceService = VibeVoiceService.shared
     private let logger = VoxtralLogger.shared
     private let recordingRepo = GRDBRecordingRepository()
+
+    struct ResolvedLanguage: Equatable {
+        let code: String
+        let source: String
+        let confidence: Float?
+    }
     private let utteranceProcessor = UtteranceProcessor()
     private let modelSettings = GlobalModelSettings.shared
     private let dbManager = GRDBDatabaseManager.shared
@@ -30,6 +36,9 @@ class UnifiedTranscriptionManager: ObservableObject {
     
     // Track the last created recording ID for transcribeWithResult
     private var lastCreatedRecordingId: Int64?
+    /// Exact retryable resource failure from the last serialized transcription. The queue consumes
+    /// this so an OOM or proactive memory stop returns the job to `.pending` instead of `.failed`.
+    private var lastResourceFailure: TranscriptionError?
     
     // MARK: - Init
     private init() {
@@ -88,6 +97,7 @@ class UnifiedTranscriptionManager: ObservableObject {
         
         // Reset the last created recording ID before transcribing
         self.lastCreatedRecordingId = nil
+        self.lastResourceFailure = nil
         
         // Call the regular transcribe method with progress handler
         let item = await transcribe(
@@ -107,9 +117,6 @@ class UnifiedTranscriptionManager: ObservableObject {
             if let result = capturedResult {
                 logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Speaker count: \(result.detectedSpeakerCount ?? -1), embeddings: \(result.speakerEmbeddings?.count ?? 0)")
             }
-        } else if transcriptionService.currentBackend == .gemma {
-            capturedResult = gemmaService.lastTranscriptionResult
-            logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Captured GemmaService result: \(capturedResult != nil ? "Present" : "nil")")
         } else if transcriptionService.currentBackend == .vibeVoice {
             capturedResult = vibeVoiceService.lastTranscriptionResult
             logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Captured VibeVoice result: \(capturedResult != nil ? "Present" : "nil")")
@@ -118,8 +125,14 @@ class UnifiedTranscriptionManager: ObservableObject {
             logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Captured VoxtralService result: \(capturedResult != nil ? "Present" : "nil")")
         }
         
-        // Get the recording ID that was created during processIntoUtterances
-        if let recordingId = self.lastCreatedRecordingId {
+        // A failed attempt did not create or update a recording. Never attach the most recently
+        // modified, unrelated database row to a queue failure.
+        if item.status == .failed {
+            capturedRecordingId = nil
+            logger.info(
+                "[UnifiedTranscriptionManager.transcribeWithResult] Failed attempt has no recording ID"
+            )
+        } else if let recordingId = self.lastCreatedRecordingId {
             capturedRecordingId = recordingId
             logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Using captured recording ID: \(recordingId)")
         } else {
@@ -135,6 +148,11 @@ class UnifiedTranscriptionManager: ObservableObject {
         logger.info("[UnifiedTranscriptionManager.transcribeWithResult] Returning - Item: \(item.status), Result: \(capturedResult != nil), RecordingID: \(capturedRecordingId ?? -1)")
         
         return (item, capturedResult, capturedRecordingId)
+    }
+
+    func consumeLastResourceFailure() -> TranscriptionError? {
+        defer { lastResourceFailure = nil }
+        return lastResourceFailure
     }
     
     /// Transcribe audio from any source and automatically save to history
@@ -183,23 +201,27 @@ class UnifiedTranscriptionManager: ObservableObject {
         case .whisper:
             desiredBackend = .whisper
         case .llm:
-            desiredBackend = engineSelection.llmEngine == .gemma ? .gemma : .native
+            desiredBackend = .native
         case .vibeVoice:
             desiredBackend = .vibeVoice
         }
 
         var backendPreparationError: Error?
-        if transcriptionService.currentBackend != desiredBackend {
+        if engineSelection.backend == .llm, engineSelection.llmEngine == .gemma {
+            // Fail closed for legacy persisted jobs. New snapshots are normalized to Voxtral.
+            backendPreparationError = TranscriptionError.transcriptionFailed(
+                "Gemma audio transcription is deferred. Choose Whisper, VibeVoice, or Voxtral."
+            )
+        } else if transcriptionService.currentBackend != desiredBackend {
             logger.info("[UnifiedTranscriptionManager] Switching to \(desiredBackend) backend")
             do {
                 switch desiredBackend {
                 case .whisper:
                     try await transcriptionService.switchToWhisper()
-                case .gemma:
-                    try await transcriptionService.switchToGemma()
                 case .vibeVoice:
                     try await transcriptionService.switchToVibeVoice(
-                        quantization: engineSelection.vibeVoiceQuantization ?? .sixBit
+                        quantization: engineSelection.vibeVoiceQuantization
+                            ?? TranscriptionProductionDefaults.vibeVoiceQuantization
                     )
                 default:
                     try await transcriptionService.switchToNative()
@@ -210,9 +232,19 @@ class UnifiedTranscriptionManager: ObservableObject {
             }
         }
         
-        // Detect language from filename or source
-        let detectedLanguage = detectLanguage(from: actualFileName, source: source) ?? "auto"
-        logger.info("[UnifiedTranscriptionManager] Using language: \(detectedLanguage)")
+        // Respect an explicit caller selection. `auto-detected` is a UI sentinel, not a language
+        // and must never be persisted as Whisper's answer.
+        let requestedLanguage: String
+        let normalizedRequested = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !normalizedRequested.isEmpty,
+           normalizedRequested != "auto",
+           normalizedRequested != "auto-detected",
+           normalizedRequested != "unknown" {
+            requestedLanguage = normalizedRequested
+        } else {
+            requestedLanguage = detectLanguage(from: actualFileName, source: source) ?? "auto"
+        }
+        logger.info("[UnifiedTranscriptionManager] Requested language: \(requestedLanguage)")
         
         // Perform transcription
         let transcript: String
@@ -245,9 +277,10 @@ class UnifiedTranscriptionManager: ObservableObject {
             // Update progress: Starting transcription
             await progressHandler?(.preparingAudio, 0.05, "Preparing audio...", nil, nil)
             
-            // Monitor WhisperService progress if using Whisper backend
+            // Monitor the active backend's unified progress. VibeVoice long-window passes must be
+            // visible to the queue just like Whisper VAD chunks.
             var progressTask: Task<Void, Never>? = nil
-            if transcriptionService.currentBackend == .whisper && progressHandler != nil {
+            if progressHandler != nil {
                 progressTask = Task { [weak self] in
                     var lastProgress: Double = 0
                     var lastStatus = ""
@@ -257,8 +290,8 @@ class UnifiedTranscriptionManager: ObservableObject {
                         // Safely check if self still exists
                         guard let self = self else { break }
                         
-                        let currentProgress = await MainActor.run { self.whisperService.transcriptionProgress }
-                        let currentStatus = await MainActor.run { self.whisperService.transcriptionStatus }
+                        let currentProgress = await MainActor.run { self.transcriptionProgress }
+                        let currentStatus = await MainActor.run { self.transcriptionStatus }
                         
                         if currentProgress != lastProgress || currentStatus != lastStatus {
                             lastProgress = currentProgress
@@ -275,12 +308,15 @@ class UnifiedTranscriptionManager: ObservableObject {
                             var totalChunks: Int? = nil
                             var completedChunks: Int? = nil
                             
-                            if currentStatus.lowercased().contains("chunk") {
+                            let lowerStatus = currentStatus.lowercased()
+                            if lowerStatus.contains("chunk") || lowerStatus.contains("pass") {
                                 // Parse "Processing chunk X of Y" or "Chunk X/Y" or similar
                                 // Try both patterns: "chunk X of Y" and "Chunk X/Y"
                                 let patterns = [
                                     #"[Cc]hunk\s+(\d+)\s+of\s+(\d+)"#,
-                                    #"[Cc]hunk\s+(\d+)/(\d+)"#
+                                    #"[Cc]hunk\s+(\d+)/(\d+)"#,
+                                    #"[Pp]ass\s+(\d+)\s+of\s+(\d+)"#,
+                                    #"[Pp]ass\s+(\d+)/(\d+)"#
                                 ]
                                 
                                 for pattern in patterns {
@@ -305,7 +341,11 @@ class UnifiedTranscriptionManager: ObservableObject {
                                 phase = .preparingAudio
                             } else if currentStatus.contains("VAD") || currentStatus.contains("Splitting") || currentStatus.contains("Analyzing voice") {
                                 phase = .splittingChunks
-                            } else if currentStatus.contains("chunk") || currentStatus.contains("Transcribing") || currentStatus.contains("Processing") {
+                            } else if lowerStatus.contains("chunk")
+                                        || lowerStatus.contains("pass")
+                                        || lowerStatus.contains("transcribing")
+                                        || lowerStatus.contains("processing")
+                                        || lowerStatus.contains("retrying") {
                                 phase = .transcribingChunks
                             } else if currentStatus.contains("Combining") || currentStatus.contains("Unifying") {
                                 phase = .combiningResults
@@ -346,7 +386,7 @@ class UnifiedTranscriptionManager: ObservableObject {
                 audioFile: audioFile,
                 modelKey: nil,  // Use variant instead of legacy modelKey
                 variant: modelVariant,
-                language: detectedLanguage,
+                language: requestedLanguage,
                 speakerConfiguration: speakerConfigurationAtStart,
                 engineSelection: engineSelection,
                 runSettings: effectiveRunSettings
@@ -365,18 +405,41 @@ class UnifiedTranscriptionManager: ObservableObject {
             }
         } catch {
             // For errors, still create an item but with failed status
+            if let transcriptionError = error as? TranscriptionError {
+                switch transcriptionError {
+                case .gpuOutOfMemory, .resourcesUnavailable:
+                    lastResourceFailure = transcriptionError
+                default:
+                    break
+                }
+            }
             transcript = ""
             status = .failed
             errorMessage = error.localizedDescription
             logger.error("[UnifiedTranscriptionManager] Transcription failed: \(error)")
         }
         
+        let completedResult: TranscriptionResult?
+        switch desiredBackend {
+        case .whisper:
+            completedResult = whisperService.lastTranscriptionResult
+        case .vibeVoice:
+            completedResult = vibeVoiceService.lastTranscriptionResult
+        default:
+            completedResult = voxtralService.lastTranscriptionResult
+        }
+        let resolvedLanguage = Self.resolveLanguage(
+            requestedLanguage: requestedLanguage,
+            result: completedResult,
+            transcript: transcript
+        )
+
         // Create transcription item
         let transcriptionItem = TranscriptionItem(
             fileName: actualFileName,
             filePath: audioFile,
             transcript: transcript,
-            language: language,
+            language: resolvedLanguage?.code ?? "unknown",
             duration: duration,
             fileSize: fileSize,
             createdDate: createdDate,
@@ -386,14 +449,6 @@ class UnifiedTranscriptionManager: ObservableObject {
             error: errorMessage
         )
         var finalTranscriptionItem = transcriptionItem
-        
-        // Save to history
-        saveTranscriptionItem(transcriptionItem)
-        
-        // Update last item for UI
-        await MainActor.run {
-            self.lastTranscriptionItem = transcriptionItem
-        }
         
         // Process into utterances if transcription succeeded
         if status == .completed || status == .partialSuccess {
@@ -406,22 +461,21 @@ class UnifiedTranscriptionManager: ObservableObject {
             await progressHandler?(.finalizing, 0.75, "Processing utterances...", nil, nil)
 
             // Get chunks with speaker data from the transcription result
-            let resultChunks: [TranscriptionChunk]?
-            if transcriptionService.currentBackend == .whisper {
-                resultChunks = whisperService.lastTranscriptionResult?.chunks
-            } else if transcriptionService.currentBackend == .gemma {
-                resultChunks = gemmaService.lastTranscriptionResult?.chunks
-            } else if transcriptionService.currentBackend == .vibeVoice {
-                resultChunks = vibeVoiceService.lastTranscriptionResult?.chunks
-            } else {
-                resultChunks = voxtralService.lastTranscriptionResult?.chunks
-            }
+            let resultChunks = completedResult?.chunks
 
             let persisted = await processIntoUtterances(
                 transcriptionItem: transcriptionItem,
                 transcript: transcript,
                 chunks: resultChunks,
                 existingRecordingId: existingRecordingId,
+                transcriptionProvenance: RecordingTranscriptionProvenance(
+                    engineSelection: engineSelection,
+                    runSettings: effectiveRunSettings,
+                    completedAt: transcriptionItem.transcribedDate,
+                    detectedLanguage: resolvedLanguage?.code,
+                    languageDetectionSource: resolvedLanguage?.source,
+                    languageDetectionConfidence: resolvedLanguage?.confidence
+                ),
                 speakerProfile: speakerProfileAtStart,
                 speakerConfiguration: speakerConfigurationAtStart
             )
@@ -453,18 +507,43 @@ class UnifiedTranscriptionManager: ObservableObject {
                 )
             }
         }
-        
+
+        let completedItem = finalTranscriptionItem
+        saveTranscriptionItem(
+            completedItem,
+            recordingId: lastCreatedRecordingId ?? existingRecordingId
+        )
+
+        let succeeded = completedItem.status == .completed
+            || completedItem.status == .partialSuccess
+        let finalStatusMessage = succeeded ? "Completed" : "Failed"
         await MainActor.run {
-            self.transcriptionProgress = 1.0
-            self.transcriptionStatus = "Completed"
+            self.lastTranscriptionItem = completedItem
+            self.transcriptionProgress = succeeded ? 1.0 : 0.0
+            self.transcriptionStatus = finalStatusMessage
             self.isTranscribing = false
         }
-        
-        // Notify progress handler - completed
-        await progressHandler?(.finalizing, 1.0, "Completed", nil, nil)
-        
-        logger.info("[UnifiedTranscriptionManager] Transcription completed and saved for: \(actualFileName)")
-        return finalTranscriptionItem
+
+        await progressHandler?(
+            .finalizing,
+            succeeded ? 1.0 : 0.0,
+            finalStatusMessage,
+            nil,
+            nil
+        )
+
+        if succeeded {
+            logger.info(
+                "[UnifiedTranscriptionManager] Transcription completed and saved for: "
+                    + actualFileName
+            )
+        } else {
+            logger.error(
+                "[UnifiedTranscriptionManager] Transcription attempt failed for: "
+                    + actualFileName
+            )
+        }
+        return completedItem
     }
     
     /// Transcribe multiple files in batch
@@ -511,8 +590,9 @@ class UnifiedTranscriptionManager: ObservableObject {
     
     /// Cancel current transcription
     func cancelTranscription() {
+        whisperService.cancelTranscription()
         voxtralService.cancelTranscription()
-        gemmaService.cancelTranscription()
+        vibeVoiceService.cancel()
     }
     
     // MARK: - Utterance Processing
@@ -533,6 +613,7 @@ class UnifiedTranscriptionManager: ObservableObject {
         transcript: String,
         chunks: [TranscriptionChunk]? = nil,
         existingRecordingId: Int64? = nil,
+        transcriptionProvenance: RecordingTranscriptionProvenance,
         speakerProfile: SpeakerPipelineProfile,
         speakerConfiguration: SpeakerPipelineConfiguration
     ) async -> Bool {
@@ -551,7 +632,13 @@ class UnifiedTranscriptionManager: ObservableObject {
             let recordingId: Int64
             var replacementRecording: Recording?
 
-            if let existingId = existingRecordingId {
+            // Resolve the recording to update: an explicit re-transcription target, or — for a
+            // "new" discovery — a row a prior attempt already left behind under this exact
+            // file_name (even an empty/failed one). `file_name` is UNIQUE, so blindly INSERTing
+            // in that case throws a constraint violation instead of ever reaching this transcript.
+            let existingId = try existingRecordingId ?? recordingRepo.getByFileName(transcriptionItem.fileName)?.id
+
+            if let existingId {
                 guard let original = try recordingRepo.getById(existingId) else {
                     throw NSError(
                         domain: "AlmRecorder.Retranscription",
@@ -576,6 +663,7 @@ class UnifiedTranscriptionManager: ObservableObject {
                     fullTranscript: transcript,
                     metadata: original.metadata
                 )
+                replacementRecording?.transcriptionProvenance = transcriptionProvenance
                 recordingId = existingId
             } else {
                 // Normal path: create new recording
@@ -592,7 +680,9 @@ class UnifiedTranscriptionManager: ObservableObject {
                     fullTranscript: transcript,
                     metadata: nil
                 )
-                recordingId = try recordingRepo.create(recording)
+                var recordingWithProvenance = recording
+                recordingWithProvenance.transcriptionProvenance = transcriptionProvenance
+                recordingId = try recordingRepo.create(recordingWithProvenance)
                 logger.info("[UnifiedTranscriptionManager] Saved recording to database with ID: \(recordingId)")
 
                 // Auto-link recording to overlapping calendar meetings
@@ -624,7 +714,7 @@ class UnifiedTranscriptionManager: ObservableObject {
                 generateEmbeddings: true,  // Always true - will queue if model not loaded
                 queueEmbeddings: !EmbeddingModelManager.shared.isModelLoaded,  // Queue if not loaded
                 audioSource: MeetingTrackSource.classify(fileName: transcriptionItem.fileName),
-                replaceExisting: existingRecordingId != nil,
+                replaceExisting: replacementRecording != nil,
                 replacementRecording: replacementRecording,
                 speakerConfiguration: speakerConfiguration
             )
@@ -650,7 +740,7 @@ class UnifiedTranscriptionManager: ObservableObject {
                 await RecordingInsightsQueueManager.shared.enqueue(
                     recordingId: recordingId,
                     recordingTitle: replacementRecording?.title ?? transcriptionItem.fileName,
-                    force: existingRecordingId != nil
+                    force: replacementRecording != nil
                 )
             }
 
@@ -660,7 +750,7 @@ class UnifiedTranscriptionManager: ObservableObject {
                     recordingId: recordingId,
                     recordingTitle: replacementRecording?.title ?? transcriptionItem.fileName,
                     mode: .auto,
-                    force: existingRecordingId != nil
+                    force: replacementRecording != nil
                 )
             }
             
@@ -686,6 +776,59 @@ class UnifiedTranscriptionManager: ObservableObject {
     }
     
     // MARK: - History Management
+
+    /// Produces the value saved in `recordings.language`. Whisper's audio result always wins for
+    /// automatic runs. Text language ID exists only for legacy/checkpoint cases where no audio
+    /// result survived; its provenance prevents that weaker fallback from masquerading as audio ID.
+    static func resolveLanguage(
+        requestedLanguage: String?,
+        result: TranscriptionResult?,
+        transcript: String
+    ) -> ResolvedLanguage? {
+        let requested = requestedLanguage?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let requested,
+           !requested.isEmpty,
+           requested != "auto",
+           requested != "auto-detected",
+           requested != "unknown" {
+            return ResolvedLanguage(code: requested, source: "user_selected", confidence: nil)
+        }
+
+        if let rawResultLanguage = result?.language {
+            let resultLanguage = rawResultLanguage
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if !resultLanguage.isEmpty,
+               resultLanguage != "auto",
+               resultLanguage != "auto-detected",
+               resultLanguage != "unknown" {
+                return ResolvedLanguage(
+                    code: resultLanguage,
+                    source: result?.languageDetectionSource ?? "backend_reported",
+                    confidence: result?.languageConfidence
+                )
+            }
+        }
+
+        let chunkText = result?.chunks.map(\.text).joined(separator: "\n")
+        let sampleSource = (chunkText?.isEmpty == false ? chunkText : transcript) ?? transcript
+        let sample = String(sampleSource.prefix(20_000))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sample.isEmpty else { return nil }
+
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(sample)
+        guard let hypothesis = recognizer.languageHypotheses(withMaximum: 1).first else {
+            return nil
+        }
+        return ResolvedLanguage(
+            code: hypothesis.key.rawValue,
+            source: "transcript_fallback",
+            confidence: Float(hypothesis.value)
+        )
+    }
     
     /// Save a transcription item to history
     /// Detect language from filename or source
@@ -709,43 +852,43 @@ class UnifiedTranscriptionManager: ObservableObject {
     
     // REMOVED: selectModelForLanguage - no automatic model selection
     
-    private func saveTranscriptionItem(_ item: TranscriptionItem) {
-        Task {
-            do {
-                // Encode the item as JSON
-                let encoded = try JSONEncoder().encode(item)
-                let jsonString = String(data: encoded, encoding: .utf8) ?? "{}"
-                
-                // Generate a hash for the file
-                let fileHash = "\(item.fileName)_\(item.transcribedDate.timeIntervalSince1970)".data(using: .utf8)?.base64EncodedString() ?? ""
-                
-                // Save to database
-                try dbManager.writeQueue { db in
-                    try db.execute(
-                        sql: """
-                        INSERT INTO transcription_history 
-                        (file_name, file_path, date, duration, source, transcript_preview, 
-                         recording_id, data, file_hash, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        arguments: [
-                            item.fileName,
-                            item.filePath,
-                            item.transcribedDate,
-                            item.duration,
-                            item.source.rawValue,
-                            String(item.transcript.prefix(200)),
-                            self.lastCreatedRecordingId,
-                            jsonString,
-                            fileHash,
-                            Date()
-                        ]
-                    )
-                }
-                logger.info("[UnifiedTranscriptionManager] Saved transcription to history: \(item.fileName)")
-            } catch {
-                logger.error("[UnifiedTranscriptionManager] Failed to save transcription to history: \(error)")
+    private func saveTranscriptionItem(_ item: TranscriptionItem, recordingId: Int64?) {
+        do {
+            let encoded = try JSONEncoder().encode(item)
+            let jsonString = String(data: encoded, encoding: .utf8) ?? "{}"
+            let fileHash = "\(item.fileName)_\(item.transcribedDate.timeIntervalSince1970)"
+                .data(using: .utf8)?.base64EncodedString() ?? ""
+
+            try dbManager.writeQueue { db in
+                try db.execute(
+                    sql: """
+                    INSERT INTO transcription_history
+                    (file_name, file_path, date, duration, source, transcript_preview,
+                     recording_id, data, file_hash, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    arguments: [
+                        item.fileName,
+                        item.filePath,
+                        item.transcribedDate,
+                        item.duration,
+                        item.source.rawValue,
+                        String(item.transcript.prefix(200)),
+                        recordingId,
+                        jsonString,
+                        fileHash,
+                        Date()
+                    ]
+                )
             }
+            logger.info(
+                "[UnifiedTranscriptionManager] Saved transcription attempt to history: "
+                    + "\(item.fileName) [\(item.status)]"
+            )
+        } catch {
+            logger.error(
+                "[UnifiedTranscriptionManager] Failed to save transcription history: \(error)"
+            )
         }
     }
     
@@ -776,7 +919,7 @@ class UnifiedTranscriptionManager: ObservableObject {
                let items = try? JSONDecoder().decode([TranscriptionItem].self, from: data) {
                 // Migrate to GRDB
                 for item in items {
-                    saveTranscriptionItem(item)
+                    saveTranscriptionItem(item, recordingId: nil)
                 }
                 // Clear UserDefaults after migration
                 UserDefaults.standard.removeObject(forKey: "SavedTranscriptions")
@@ -849,18 +992,10 @@ class UnifiedTranscriptionManager: ObservableObject {
     /// Ensure embedding model is loaded before transcription
     private func ensureEmbeddingModelLoaded() async {
         if !EmbeddingModelManager.shared.isModelLoaded {
-            logger.info("[UnifiedTranscriptionManager] Loading embedding model...")
+            logger.info("[UnifiedTranscriptionManager] No embedding model installed; derived embeddings will remain queued")
             
             await MainActor.run {
-                self.transcriptionStatus = "Loading embedding model..."
-            }
-            
-            await EmbeddingModelManager.shared.ensureDefaultModel()
-            
-            if EmbeddingModelManager.shared.isModelLoaded {
-                logger.info("[UnifiedTranscriptionManager] Embedding model loaded successfully")
-            } else {
-                logger.warning("[UnifiedTranscriptionManager] Failed to load embedding model - embeddings will be queued")
+                self.transcriptionStatus = "Embedding model not installed — indexing will wait"
             }
         }
     }

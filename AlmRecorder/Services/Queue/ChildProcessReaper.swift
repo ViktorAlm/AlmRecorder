@@ -41,7 +41,7 @@ final class ChildProcessReaper {
     private let logger = VoxtralLogger.shared
     private var sweepTask: Task<Void, Never>?
 
-    private init() {}
+    init() {}
 
     /// Begin the periodic sweep. Idempotent; call once at app launch.
     func start() {
@@ -67,6 +67,31 @@ final class ChildProcessReaper {
         lock.lock()
         entries.removeAll { $0.process === process }
         lock.unlock()
+    }
+
+    /// Stop the watchdog and synchronously terminate every tracked model child during normal app
+    /// shutdown. A detached Python/MLX process otherwise survives its Swift parent and can retain
+    /// several gigabytes of unified memory after the app has visibly quit.
+    func terminateAllForAppShutdown() {
+        lock.lock()
+        let snapshot = entries
+        entries.removeAll()
+        let task = sweepTask
+        sweepTask = nil
+        lock.unlock()
+
+        task?.cancel()
+        for entry in snapshot where entry.process.isRunning {
+            entry.process.terminate()
+        }
+
+        let deadline = Date().addingTimeInterval(1)
+        while snapshot.contains(where: { $0.process.isRunning }), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        for entry in snapshot where entry.process.isRunning {
+            kill(entry.process.processIdentifier, SIGKILL)
+        }
     }
 
     private func sweep() {

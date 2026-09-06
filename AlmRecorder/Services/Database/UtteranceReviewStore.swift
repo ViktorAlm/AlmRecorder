@@ -4,7 +4,7 @@ import GRDB
 /// How an utterance's current `text` came to be.
 enum UtteranceTextSource: String {
     case asr        // straight from the transcription engine
-    case verifier   // rewritten by the Gemma audio-verification pass
+    case verifier   // legacy provenance for historical automatic verification
     case user       // manually edited
 }
 

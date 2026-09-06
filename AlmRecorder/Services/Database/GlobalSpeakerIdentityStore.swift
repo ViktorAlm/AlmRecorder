@@ -1,6 +1,88 @@
 import Foundation
 import GRDB
 
+struct SpeakerAcousticEvidenceTarget: Equatable, Sendable {
+    let clusterID: Int64
+    let spans: [SpeakerIdentityTimeSpan]
+}
+
+struct SpeakerAcousticEvidenceMatch: Equatable, Sendable {
+    let clusterID: Int64
+    let evidenceIndex: Int
+    let overlapPurity: Double
+    let targetCoverage: Double
+}
+
+/// Maps a historical recording-local cluster onto a fresh diarization cluster using only their
+/// immutable timelines. Ambiguous overlaps are deliberately left missing instead of teaching the
+/// global model a blended or incorrectly labeled voice.
+enum SpeakerAcousticEvidenceMatcher {
+    static func matches(
+        targets: [SpeakerAcousticEvidenceTarget],
+        evidence: [SpeakerIdentityCluster],
+        minimumPurity: Double = 0.80,
+        minimumTargetCoverage: Double = 0.45,
+        minimumOverlap: TimeInterval = 0.40
+    ) -> [SpeakerAcousticEvidenceMatch] {
+        targets.compactMap { target in
+            let duration = unionDuration(target.spans)
+            guard duration > 0 else { return nil }
+            let scores = evidence.enumerated().map { index, candidate in
+                (
+                    index: index,
+                    overlap: overlapDuration(target.spans, candidate.spans)
+                )
+            }
+            .filter { $0.overlap > 0 }
+            .sorted {
+                if $0.overlap != $1.overlap { return $0.overlap > $1.overlap }
+                return $0.index < $1.index
+            }
+            guard let best = scores.first, best.overlap >= minimumOverlap else { return nil }
+            let observed = scores.reduce(0) { $0 + $1.overlap }
+            let purity = observed > 0 ? best.overlap / observed : 0
+            let coverage = min(1, best.overlap / duration)
+            guard purity >= minimumPurity,
+                  coverage >= minimumTargetCoverage else { return nil }
+            return SpeakerAcousticEvidenceMatch(
+                clusterID: target.clusterID,
+                evidenceIndex: best.index,
+                overlapPurity: purity,
+                targetCoverage: coverage
+            )
+        }
+    }
+
+    private static func overlapDuration(
+        _ lhs: [SpeakerIdentityTimeSpan],
+        _ rhs: [SpeakerIdentityTimeSpan]
+    ) -> TimeInterval {
+        lhs.reduce(0) { total, left in
+            total + rhs.reduce(0) { partial, right in
+                partial + max(0, min(left.end, right.end) - max(left.start, right.start))
+            }
+        }
+    }
+
+    private static func unionDuration(_ spans: [SpeakerIdentityTimeSpan]) -> TimeInterval {
+        let sorted = spans.filter { $0.end > $0.start }.sorted { $0.start < $1.start }
+        guard var current = sorted.first else { return 0 }
+        var total: TimeInterval = 0
+        for span in sorted.dropFirst() {
+            if span.start <= current.end {
+                current = SpeakerIdentityTimeSpan(
+                    start: current.start,
+                    end: max(current.end, span.end)
+                )
+            } else {
+                total += current.duration
+                current = span
+            }
+        }
+        return total + current.duration
+    }
+}
+
 /// Persistent separation between immutable recording-local voice clusters and global people.
 ///
 /// `utterances.speaker_uuid` remains a denormalized projection for the existing UI/search queries.
@@ -153,6 +235,56 @@ enum GlobalSpeakerIdentityStore {
             table.column("previous_state", .text).notNull()
             table.column("previous_source", .text).notNull()
             table.primaryKey(["operation_id", "local_cluster_id"])
+        }
+
+        // A from-scratch reconciliation may split one legacy identity and merge several others in
+        // the same atomic run. These tables snapshot every assignment and speaker projection so
+        // the whole run can be undone without deleting immutable local-cluster evidence.
+        try db.create(table: "speaker_reconciliation_runs", ifNotExists: true) { table in
+            table.column("id", .text).primaryKey()
+            table.column("status", .text).notNull().defaults(to: "active")
+            table.column("matcher", .text).notNull()
+            table.column("calibration_pair_count", .integer).notNull()
+            table.column("held_out_pair_count", .integer).notNull()
+            table.column("changed_cluster_count", .integer).notNull().defaults(to: 0)
+            table.column("created_identity_count", .integer).notNull().defaults(to: 0)
+            table.column("created_at", .datetime).notNull()
+            table.column("undone_at", .datetime)
+        }
+        try db.create(table: "speaker_reconciliation_members", ifNotExists: true) { table in
+            table.column("run_id", .text).notNull()
+                .references("speaker_reconciliation_runs", onDelete: .cascade)
+            table.column("local_cluster_id", .integer).notNull()
+                .references("speaker_local_clusters", onDelete: .cascade)
+            table.column("previous_speaker_uuid", .text).notNull()
+            table.column("previous_state", .text).notNull()
+            table.column("previous_source", .text).notNull()
+            table.column("previous_confidence", .double).notNull()
+            table.column("previous_score", .double)
+            table.column("previous_margin", .double)
+            table.column("previous_supporting_prototype_count", .integer)
+            table.column("previous_matcher", .text)
+            table.column("previous_evidence_json", .text)
+            table.column("previous_operation_id", .integer)
+            table.column("target_speaker_uuid", .text).notNull()
+            table.primaryKey(["run_id", "local_cluster_id"])
+        }
+        try db.create(table: "speaker_reconciliation_speakers", ifNotExists: true) { table in
+            table.column("run_id", .text).notNull()
+                .references("speaker_reconciliation_runs", onDelete: .cascade)
+            table.column("speaker_uuid", .text).notNull()
+            table.column("previous_identity_state", .text)
+            table.column("previous_canonical_uuid", .text)
+            table.column("was_created", .boolean).notNull().defaults(to: false)
+            table.primaryKey(["run_id", "speaker_uuid"])
+        }
+        let assignmentColumns = Set(
+            try db.columns(in: "speaker_global_assignments").map(\.name)
+        )
+        if !assignmentColumns.contains("reconciliation_run_id") {
+            try db.alter(table: "speaker_global_assignments") {
+                $0.add(column: "reconciliation_run_id", .text)
+            }
         }
 
         try db.create(table: "speaker_global_candidates", ifNotExists: true) { table in
@@ -352,6 +484,90 @@ enum GlobalSpeakerIdentityStore {
         }
     }
 
+    /// Fill only missing acoustic evidence. Existing local keys, global assignments, trusted
+    /// names, pair labels, transcript text, and utterance speaker projections are never changed.
+    /// Returning a count makes the operation naturally resumable at recording granularity.
+    @discardableResult
+    static func backfillAcousticEvidence(
+        _ db: Database,
+        recordingId: Int64,
+        evidence: [SpeakerIdentityCluster]
+    ) throws -> Int {
+        guard !evidence.isEmpty else { return 0 }
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id, spans_json
+                FROM speaker_local_clusters
+                WHERE recording_id = ? AND embedding IS NULL
+                ORDER BY id
+            """,
+            arguments: [recordingId]
+        )
+        let targets = rows.compactMap { row -> SpeakerAcousticEvidenceTarget? in
+            guard let id: Int64 = row["id"] else { return nil }
+            return SpeakerAcousticEvidenceTarget(
+                clusterID: id,
+                spans: decodeSpans(row["spans_json"])
+            )
+        }
+        let matches = SpeakerAcousticEvidenceMatcher.matches(
+            targets: targets,
+            evidence: evidence
+        )
+        guard !matches.isEmpty else { return 0 }
+
+        var affectedUUIDs: Set<String> = []
+        for match in matches {
+            let candidate = evidence[match.evidenceIndex]
+            guard candidate.embedding.count == SpeakerEmbeddingPolicy.dimension else { continue }
+            try db.execute(
+                sql: """
+                    UPDATE speaker_local_clusters SET
+                        embedding = ?,
+                        confidence = MAX(confidence, ?),
+                        cohesion = ?,
+                        embedding_turn_count = MAX(embedding_turn_count, ?),
+                        mixture_split_gain = ?,
+                        mixture_centroid_similarity = ?,
+                        updated_at = ?
+                    WHERE id = ? AND embedding IS NULL
+                """,
+                arguments: [
+                    VoiceEmbeddingStore.floatsToData(
+                        VoiceMath.normalized(candidate.embedding)
+                    ),
+                    candidate.confidence,
+                    candidate.cohesion,
+                    candidate.embeddingTurnCount,
+                    candidate.mixtureSplitGain,
+                    candidate.mixtureCentroidSimilarity,
+                    Date(),
+                    match.clusterID,
+                ]
+            )
+            if let uuid = try String.fetchOne(
+                db,
+                sql: """
+                    SELECT speaker_uuid FROM speaker_global_assignments
+                    WHERE local_cluster_id = ?
+                """,
+                arguments: [match.clusterID]
+            ) {
+                affectedUUIDs.insert(uuid)
+            }
+        }
+        for uuid in affectedUUIDs {
+            try refreshProfile(db, uuid: uuid)
+            try SpeakerVoicePrototypeStore.rebuild(
+                db,
+                speakerUUID: uuid,
+                policy: .qualityDurationWeighted
+            )
+        }
+        return matches.count
+    }
+
     static func loadProfileEvidence(_ db: Database) throws -> [SpeakerIdentityProfileEvidence] {
         let snapshots = try loadProfileSnapshots(db)
         let meansByUUID: [String: [Float]] = Dictionary(
@@ -489,6 +705,15 @@ enum GlobalSpeakerIdentityStore {
             ]
         )
         let operationId = db.lastInsertedRowID
+        if linkSource == .manual,
+           try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.recordManualGlobalMerge(
+                db,
+                sourceUUID: source,
+                targetUUID: target,
+                operationID: operationId
+            )
+        }
         let assignmentState: GlobalSpeakerAssignmentState =
             linkSource == .manual ? .manual : .automatic
         let assignmentSource: SpeakerAssignmentSource =
@@ -516,6 +741,7 @@ enum GlobalSpeakerIdentityStore {
                         speaker_uuid = ?, state = ?, source = ?,
                         score = ?, margin = ?, supporting_prototype_count = ?,
                         matcher = ?, evidence_json = ?, operation_id = ?, updated_at = ?
+                        , reconciliation_run_id = NULL
                     WHERE local_cluster_id = ?
                 """,
                 arguments: [
@@ -638,6 +864,12 @@ enum GlobalSpeakerIdentityStore {
             """,
             arguments: [Date(), operationId]
         )
+        if try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.deleteDerivedLabels(
+                db,
+                actionID: "global-merge:\(operationId)"
+            )
+        }
         try refreshProfile(db, uuid: sourceUUID)
         try refreshProfile(db, uuid: targetUUID)
         return true
@@ -668,7 +900,8 @@ enum GlobalSpeakerIdentityStore {
         state: GlobalSpeakerAssignmentState = .manual,
         source: SpeakerAssignmentSource = .globalManual,
         matcher: String = "user-local-cluster",
-        refreshProfiles: Bool = true
+        refreshProfiles: Bool = true,
+        goldActionID: String? = nil
     ) throws {
         let target = try canonicalUUID(db, uuid: targetUUID)
         guard try speakerExists(db, uuid: target) else { return }
@@ -716,6 +949,21 @@ enum GlobalSpeakerIdentityStore {
                 arguments: [target, source.rawValue, Date(), clusterId]
             )
         }
+        if (state == .manual || state == .gold),
+           source == .globalManual,
+           oldUUID != target,
+           try db.tableExists("speaker_pair_gold_labels") {
+            let labelSource: SpeakerPairGoldSource =
+                matcher == "user-profile-split" ? .profileSplit : .manualAssignment
+            try SpeakerPairGoldStore.recordManualAssignment(
+                db,
+                clusterID: clusterId,
+                previousUUID: oldUUID,
+                targetUUID: target,
+                source: labelSource,
+                actionID: goldActionID ?? "local-assignment:\(UUID().uuidString)"
+            )
+        }
         if refreshProfiles {
             try refreshProfile(db, uuid: target)
             if let oldUUID, oldUUID != target {
@@ -732,6 +980,7 @@ enum GlobalSpeakerIdentityStore {
         to targetUUID: String,
         displayLabel: String?
     ) throws {
+        let target = try canonicalUUID(db, uuid: targetUUID)
         guard var row = try Row.fetchOne(
             db,
             sql: """
@@ -786,19 +1035,30 @@ enum GlobalSpeakerIdentityStore {
                 WHERE id = ?
             """,
             arguments: [
-                childClusterId, targetUUID, displayLabel,
+                childClusterId, target, displayLabel,
                 SpeakerAssignmentSource.globalManual.rawValue, Date(), utteranceId
             ]
         )
         try assignLocalCluster(
             db,
             clusterId: childClusterId,
-            to: targetUUID,
+            to: target,
             displayLabel: displayLabel,
             state: .manual,
             source: .globalManual,
             matcher: "user-single-utterance-split"
         )
+        if oldUUID != target,
+           try db.tableExists("speaker_pair_gold_labels") {
+            try SpeakerPairGoldStore.recordManualAssignment(
+                db,
+                clusterID: childClusterId,
+                previousUUID: oldUUID,
+                targetUUID: target,
+                source: .manualAssignment,
+                actionID: "utterance-assignment:\(utteranceId)"
+            )
+        }
         if let oldClusterId, oldClusterId != childClusterId {
             try refreshLocalClusterEvidence(db, clusterId: oldClusterId)
         }
@@ -1089,6 +1349,7 @@ enum GlobalSpeakerIdentityStore {
                     matcher = excluded.matcher,
                     evidence_json = excluded.evidence_json,
                     operation_id = NULL,
+                    reconciliation_run_id = NULL,
                     updated_at = excluded.updated_at
             """,
             arguments: [

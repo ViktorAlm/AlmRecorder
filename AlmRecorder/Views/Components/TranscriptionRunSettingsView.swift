@@ -6,7 +6,6 @@ struct TranscriptionRunSettingsView: View {
     @ObservedObject private var modelSettings = GlobalModelSettings.shared
     @StateObject private var whisperManager = WhisperModelManager.shared
     @StateObject private var voxtralService = VoxtralCppService()
-    @StateObject private var gemmaService = GemmaCppService()
     @StateObject private var embeddingManager = EmbeddingModelManager.shared
     @State private var showAdvanced = false
     
@@ -34,7 +33,7 @@ struct TranscriptionRunSettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .onChange(of: settings.selectedPreset) { newValue in
+                    .onChange(of: settings.selectedPreset) { _, newValue in
                         if newValue != .custom {
                             settings.applyPreset(newValue)
                         }
@@ -60,7 +59,7 @@ struct TranscriptionRunSettingsView: View {
                                 .monospacedDigit()
                         }
                         Slider(value: $settings.temperature, in: 0...1, step: 0.05)
-                            .onChange(of: settings.temperature) { _ in
+                            .onChange(of: settings.temperature) {
                                 settings.selectedPreset = .custom
                             }
                     }
@@ -83,7 +82,7 @@ struct TranscriptionRunSettingsView: View {
                             in: 1...100,
                             step: 1
                         )
-                        .onChange(of: settings.topK) { _ in
+                        .onChange(of: settings.topK) {
                             settings.selectedPreset = .custom
                         }
                     }
@@ -259,33 +258,15 @@ struct TranscriptionRunSettingsView: View {
                         .pickerStyle(.menu)
                         .disabled(whisperManager.downloadedModels.isEmpty)
                     } else if modelSettings.transcriptionBackend == .llm {
-                        // LLM engine selector
-                        Picker("", selection: $modelSettings.selectedLLMEngine) {
-                            Text("Voxtral").tag(LLMEngine.voxtral)
-                            Text("Gemma").tag(LLMEngine.gemma)
+                        // Gemma audio transcription is deferred; Voxtral is the only LLM ASR.
+                        Picker("", selection: $modelSettings.selectedVoxtralTranscriptionModel) {
+                            ForEach(Array(voxtralService.availableModels.keys.sorted()), id: \.self) { key in
+                                if let model = voxtralService.availableModels[key] {
+                                    Text(model.name).tag(key)
+                                }
+                            }
                         }
                         .pickerStyle(.menu)
-                        .frame(width: 90)
-
-                        if modelSettings.selectedLLMEngine == .gemma {
-                            Picker("", selection: $modelSettings.selectedGemmaTranscriptionModel) {
-                                ForEach(Array(gemmaService.availableModels.keys.sorted()), id: \.self) { key in
-                                    if let model = gemmaService.availableModels[key] {
-                                        Text(model.name).tag(key)
-                                    }
-                                }
-                            }
-                            .pickerStyle(.menu)
-                        } else {
-                            Picker("", selection: $modelSettings.selectedVoxtralTranscriptionModel) {
-                                ForEach(Array(voxtralService.availableModels.keys.sorted()), id: \.self) { key in
-                                    if let model = voxtralService.availableModels[key] {
-                                        Text(model.name).tag(key)
-                                    }
-                                }
-                            }
-                            .pickerStyle(.menu)
-                        }
                     } else {
                         Picker("", selection: $modelSettings.selectedVibeVoiceQuantization) {
                             ForEach(VibeVoiceQuantization.allCases) { quantization in
@@ -326,8 +307,8 @@ struct TranscriptionRunSettingsView: View {
                         .frame(width: 150, alignment: .leading)
 
                     Picker("", selection: $modelSettings.selectedTextLLMModel) {
-                        ForEach(Array(gemmaService.availableModels.keys.sorted()), id: \.self) { key in
-                            if let model = gemmaService.availableModels[key] {
+                        ForEach(Array(GemmaConfiguration.models.keys.sorted()), id: \.self) { key in
+                            if let model = GemmaConfiguration.models[key] {
                                 Text(model.name).tag(key)
                             }
                         }

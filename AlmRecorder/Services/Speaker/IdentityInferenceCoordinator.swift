@@ -7,7 +7,7 @@ import Foundation
 /// Fetching, applying, and confirming live here; the engine stays pure. Viewing the inbox is read-only
 /// (`pendingSuggestions()` / `appliedInferences()`); side effects happen only on an explicit `recompute()`
 /// (post-transcription trigger or the inbox's "Re-run").
-final class IdentityInferenceCoordinator {
+final class IdentityInferenceCoordinator: @unchecked Sendable {
     static let shared = IdentityInferenceCoordinator()
 
     private let db = GRDBDatabaseManager.shared

@@ -7,6 +7,7 @@ struct TagManagementView: View {
     @State private var editingTag: Tag? = nil
     @State private var editName = ""
     @State private var tagPendingDeletion: Tag?
+    @State private var tagPendingMCPHide: Tag?
 
     private let tagRepo = GRDBTagRepository()
     private let presetColors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#DDA0DD", "#98D8C8", "#F7DC6F"]
@@ -61,11 +62,35 @@ struct TagManagementView: View {
                                 Text(item.tag.name)
                                     .font(.body)
 
+                                if item.tag.hidesRecordingsFromMCP {
+                                    Image(systemName: "network.slash")
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                        .help("This tag hides its recordings from MCP")
+                                }
+
                                 Spacer()
 
                                 Text("\(item.count) recordings")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+
+                                Toggle(
+                                    "Hide from MCP",
+                                    isOn: Binding(
+                                        get: { item.tag.hidesRecordingsFromMCP },
+                                        set: {
+                                            if $0 {
+                                                tagPendingMCPHide = item.tag
+                                            } else {
+                                                setMCPPrivacy(for: item.tag, hides: false)
+                                            }
+                                        }
+                                    )
+                                )
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                                .help("Treat every recording with this tag as nonexistent to MCP clients")
 
                                 Button(action: { startEdit(item.tag) }) {
                                     Image(systemName: "pencil")
@@ -105,6 +130,23 @@ struct TagManagementView: View {
         } message: {
             let count = tags.first { $0.tag.id == tagPendingDeletion?.id }?.count ?? 0
             Text("“\(tagPendingDeletion?.name ?? "This tag")” will be removed from \(count) recording\(count == 1 ? "" : "s"). This cannot be undone.")
+        }
+        .alert(
+            "Hide tagged recordings from MCP?",
+            isPresented: Binding(
+                get: { tagPendingMCPHide != nil },
+                set: { if !$0 { tagPendingMCPHide = nil } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { tagPendingMCPHide = nil }
+            Button("Hide from MCP", role: .destructive) {
+                guard let tag = tagPendingMCPHide else { return }
+                tagPendingMCPHide = nil
+                setMCPPrivacy(for: tag, hides: true)
+            }
+        } message: {
+            let count = tags.first { $0.tag.id == tagPendingMCPHide?.id }?.count ?? 0
+            Text("\(count) recording\(count == 1 ? "" : "s") will immediately become unavailable to every MCP client. The recordings remain available inside AlmRecorder.")
         }
     }
 
@@ -154,6 +196,16 @@ struct TagManagementView: View {
             loadTags()
         } catch {
             print("[TagManagementView] Failed to delete tag: \(error)")
+        }
+    }
+
+    private func setMCPPrivacy(for tag: Tag, hides: Bool) {
+        guard let id = tag.id else { return }
+        do {
+            try tagRepo.setHidesRecordingsFromMCP(id: id, hides: hides)
+            loadTags()
+        } catch {
+            print("[TagManagementView] Failed to update MCP privacy: \(error)")
         }
     }
 

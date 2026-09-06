@@ -557,7 +557,7 @@ class SpeakerIdentificationService {
         try speakerRepo.delete(uuid: uuid)
         
         // Update cache
-        cacheQueue.sync(flags: .barrier) {
+        _ = cacheQueue.sync(flags: .barrier) {
             self.speakerCache.removeValue(forKey: uuid)
         }
     }

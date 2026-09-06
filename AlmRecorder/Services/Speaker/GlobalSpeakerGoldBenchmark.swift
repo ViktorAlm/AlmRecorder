@@ -45,6 +45,10 @@ struct GlobalSpeakerIdentityCandidateReport: Codable, Equatable, Identifiable, S
     let endToEndPairF1: Double?
     let endToEndFalseMergePairs: Int
     let endToEndFalseSplitPairs: Int
+    /// Exact recording-local-cluster assignments for this candidate. They are stored only in the
+    /// developer's private benchmark artifact so the comparison UI can explain every method.
+    /// Older artifacts decode with no assignments and simply ask for a fresh benchmark run.
+    var assignments: [String: String]? = nil
 }
 
 /// The development-gold gate is intentionally asymmetric: global recall may improve only without

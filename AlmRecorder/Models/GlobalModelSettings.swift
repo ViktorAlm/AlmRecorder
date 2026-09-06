@@ -6,9 +6,11 @@ enum TranscriptionBackend: String, CaseIterable, Codable {
     case vibeVoice = "VibeVoice"
 }
 
-/// Which LLM engine powers the "LLM" backend — for both transcription and text generation.
+/// Which engine powers the legacy "LLM" transcription backend.
 enum LLMEngine: String, CaseIterable, Codable {
     case voxtral = "Voxtral"
+    /// Decode-only compatibility for old settings and queued jobs. Gemma audio input is deferred;
+    /// Gemma remains available separately as a text-only model.
     case gemma = "Gemma"
 }
 
@@ -80,14 +82,14 @@ class GlobalModelSettings: ObservableObject {
         }
     }
 
-    /// Which engine the LLM backend uses (Voxtral or Gemma).
+    /// Which engine the LLM transcription backend uses. New/live selections are always Voxtral.
     @Published var selectedLLMEngine: LLMEngine {
         didSet {
             settingsRepo.setString(selectedLLMEngine.rawValue, forKey: "selectedLLMEngine")
         }
     }
 
-    /// Selected Gemma model key for transcription (e.g. "12B-Q5_K_M").
+    /// Legacy persisted Gemma-ASR key. Decode-only while Gemma audio input is deferred.
     @Published var selectedGemmaTranscriptionModel: String {
         didSet {
             settingsRepo.setString(selectedGemmaTranscriptionModel, forKey: "selectedGemmaTranscriptionModel")
@@ -114,8 +116,8 @@ class GlobalModelSettings: ObservableObject {
         }
     }
 
-    /// Transcript cleanup: score utterances for hallucinations and verify suspicious lines
-    /// against the audio with Gemma after each transcription (plus library backfill).
+    /// Transcript cleanup: score utterances for hallucinations and send uncertain cases to the
+    /// human review inbox. Gemma audio verification is deferred.
     @Published var autoCleanTranscripts: Bool {
         didSet {
             settingsRepo.setBool(autoCleanTranscripts, forKey: "autoCleanTranscripts")
@@ -244,8 +246,8 @@ class GlobalModelSettings: ObservableObject {
             ?? TranscriptionProductionDefaults.vibeVoiceSpeakerMode
         self.vibeVoiceContext = settingsRepo.getString(forKey: "vibeVoiceContext") ?? ""
 
-        // Roll the benchmark winner into production once. Existing users are switched only when
-        // its model is already installed; first-run setup downloads it below.
+        // Roll out fused 4-bit VibeVoice as the immediate foreground transcript once. The nightly
+        // pipeline reuses its exact speaker turns and adds an independent Whisper candidate.
         if settingsRepo.getBool(forKey: TranscriptionProductionDefaults.rolloutKey) != true {
             let shouldAdopt = TranscriptionProductionDefaults.shouldAdopt(
                 hasStoredBackend: storedBackendRaw != nil,
@@ -261,8 +263,13 @@ class GlobalModelSettings: ObservableObject {
             settingsRepo.setBool(true, forKey: TranscriptionProductionDefaults.rolloutKey)
         }
         if let engineRaw = settingsRepo.getString(forKey: "selectedLLMEngine"),
-           let engine = LLMEngine(rawValue: engineRaw) {
+           let engine = LLMEngine(rawValue: engineRaw),
+           engine == .voxtral {
             self.selectedLLMEngine = engine
+        } else {
+            // Migrate old Gemma-ASR selections without touching the separate text-model choice.
+            self.selectedLLMEngine = .voxtral
+            settingsRepo.setString(LLMEngine.voxtral.rawValue, forKey: "selectedLLMEngine")
         }
         self.selectedGemmaTranscriptionModel = settingsRepo.getString(forKey: "selectedGemmaTranscriptionModel") ?? GemmaConfiguration.defaultModel
         self.selectedTextLLMModel = settingsRepo.getString(forKey: "selectedTextLLMModel") ?? GemmaConfiguration.defaultModel
@@ -271,7 +278,8 @@ class GlobalModelSettings: ObservableObject {
         
         self.autoGenerateSummaries = settingsRepo.getBool(forKey: "autoGenerateSummaries") ?? false
         self.autoGenerateEmbeddings = settingsRepo.getBool(forKey: "autoGenerateEmbeddings") ?? false
-        // Off by default: each verification span is a full Gemma model load — opt-in only.
+        // Off by default. The sweep is text/acoustic-metadata scoring only; uncertain cases are
+        // kept for human review while audio-model verification is deferred.
         self.autoCleanTranscripts = settingsRepo.getBool(forKey: "autoCleanTranscripts") ?? false
         self.sweepSensitivity = Double(settingsRepo.getString(forKey: "sweepSensitivity") ?? "") ?? 1
         let storedPreset = ExemplarSweepStore.Tuning.forSensitivity(self.sweepSensitivity)
@@ -319,10 +327,7 @@ class GlobalModelSettings: ObservableObject {
         case .whisper:
             return selectedWhisperModel
         case .llm:
-            switch selectedLLMEngine {
-            case .voxtral: return selectedVoxtralTranscriptionModel
-            case .gemma: return selectedGemmaTranscriptionModel
-            }
+            return selectedVoxtralTranscriptionModel
         case .vibeVoice:
             return selectedVibeVoiceQuantization.repositoryID
         }

@@ -9,8 +9,19 @@ import AVFoundation
 /// both tracks), re-homes the surviving utterances under one combined recording sorted by time, and
 /// removes the intermediate track rows. The result opens in the normal detail view.
 enum MeetingAssembler {
-    private static let lock = NSLock()
-    private static var inProgress = Set<String>()
+    private actor FoldGate {
+        private var inProgress = Set<String>()
+
+        func claim(_ stamp: String) -> Bool {
+            inProgress.insert(stamp).inserted
+        }
+
+        func release(_ stamp: String) {
+            inProgress.remove(stamp)
+        }
+    }
+
+    private static let foldGate = FoldGate()
     private static let logger = VoxtralLogger.shared
 
     /// Parse the meeting stamp from a track file name: "meeting_<stamp>_mic.caf" → "<stamp>".
@@ -44,11 +55,8 @@ enum MeetingAssembler {
     /// - `requireBothTracks`: when true (live path) no-ops until both mic + system are present.
     @discardableResult
     static func fold(stamp: String, requireBothTracks: Bool) async -> Int64? {
-        lock.lock()
-        if inProgress.contains(stamp) { lock.unlock(); return nil }
-        inProgress.insert(stamp)
-        lock.unlock()
-        defer { lock.lock(); inProgress.remove(stamp); lock.unlock() }
+        guard await foldGate.claim(stamp) else { return nil }
+        defer { Task { await foldGate.release(stamp) } }
 
         let recRepo = GRDBRecordingRepository()
         let uttRepo = GRDBUtteranceRepository()

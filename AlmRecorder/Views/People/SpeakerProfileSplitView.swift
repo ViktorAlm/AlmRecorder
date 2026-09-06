@@ -127,7 +127,7 @@ struct SpeakerProfileSplitView: View {
                 presetButton("Balanced", value: 0.86, help: "Safer default")
                 presetButton("Strict", value: 0.90, help: "More people; lowest false-merge risk")
                 Slider(value: $threshold, in: 0.80...0.95, step: 0.01) { Text("Threshold") }
-                    .onChange(of: threshold) { _ in scheduleAnalysis() }
+                    .onChange(of: threshold) { scheduleAnalysis() }
             }
 
             HStack(spacing: 16) {
@@ -136,11 +136,11 @@ struct SpeakerProfileSplitView: View {
                     Text("Single linkage (legacy)").tag(PersonaLinkage.single)
                 }
                 .pickerStyle(.menu)
-                .onChange(of: linkage) { _ in scheduleAnalysis() }
+                .onChange(of: linkage) { scheduleAnalysis() }
 
                 Toggle("Keep different labels in one recording separate", isOn: $keepLocalLabelsSeparate)
                     .toggleStyle(.checkbox)
-                    .onChange(of: keepLocalLabelsSeparate) { _ in scheduleAnalysis() }
+                    .onChange(of: keepLocalLabelsSeparate) { scheduleAnalysis() }
                     .help("A cannot-link safety rule: two local diarizer labels from the same recording cannot be merged into one person.")
             }
             Text(strictnessExplanation)

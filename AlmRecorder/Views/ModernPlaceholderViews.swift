@@ -89,11 +89,7 @@ struct ModernImportView: View {
     private func processSelectedFiles(urls: [URL]) {
         // Queue files for transcription
         for url in urls {
-            // Check if file is an audio file
-            let audioExtensions = ["wav", "mp3", "m4a", "aiff", "flac", "ogg", "opus"]
-            let fileExtension = url.pathExtension.lowercased()
-            
-            if audioExtensions.contains(fileExtension) {
+            if AudioImportPolicy.supports(url) {
                 // Add to transcription queue
                 _ = TranscriptionQueueManager.shared.addJob(
                     audioFile: url.path,
@@ -467,6 +463,7 @@ struct ModernSettingsView: View {
         case general
         case recording
         case appearance
+        case dictation
         case transcription
         case models
         case speakers
@@ -482,6 +479,7 @@ struct ModernSettingsView: View {
             case .general: return "General"
             case .recording: return "Recording"
             case .appearance: return "Appearance"
+            case .dictation: return "Realtime Dictation"
             case .transcription: return "Transcription"
             case .models: return "Models"
             case .speakers: return "People & Speakers"
@@ -497,6 +495,7 @@ struct ModernSettingsView: View {
             case .speakers: return "Speakers"
             case .speakerID: return "Speaker ID"
             case .mcp: return "MCP"
+            case .dictation: return "Dictation"
             default: return title
             }
         }
@@ -506,6 +505,7 @@ struct ModernSettingsView: View {
             case .general: return "gear"
             case .recording: return "mic"
             case .appearance: return "paintbrush"
+            case .dictation: return "waveform.badge.mic"
             case .transcription: return "text.quote"
             case .models: return "cpu"
             case .speakers: return "person.2"
@@ -521,6 +521,7 @@ struct ModernSettingsView: View {
             case .general: return "App behavior, meeting automation, and library maintenance"
             case .recording: return "Audio quality and recording chunk size"
             case .appearance: return "Theme and accent color"
+            case .dictation: return "Hold-to-talk local dictation and text insertion"
             case .transcription: return "The engine used for new transcription jobs"
             case .models: return "Download and select local AI models"
             case .speakers: return "Review, merge, rename, and repair global identities"
@@ -579,8 +580,16 @@ struct ModernSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 settingsGroup("App", panes: [.general, .recording, .appearance])
-                settingsGroup("AI & Transcription", panes: [.transcription, .models])
-                settingsGroup("Speaker System", panes: [.speakers, .speakerID, .evaluation])
+                settingsGroup(
+                    "AI & Transcription",
+                    panes: [.dictation, .transcription, .models]
+                )
+                settingsGroup(
+                    "Speaker System",
+                    panes: FeatureFlags.developerTools
+                        ? [.speakers, .speakerID, .evaluation]
+                        : [.speakers]
+                )
                 settingsGroup("Library", panes: [.tags])
                 settingsGroup("Integrations", panes: [.mcp])
             }
@@ -633,6 +642,8 @@ struct ModernSettingsView: View {
             RecordingSettingsView()
         case .appearance:
             AppearanceSettingsView()
+        case .dictation:
+            RealtimeDictationSettingsView()
         case .transcription:
             TranscriptionSettingsView(onOpenModels: { selection = .models })
         case .models:
@@ -674,7 +685,7 @@ struct GeneralSettingsView: View {
         Form {
             Section("General") {
                 Toggle("Launch at startup", isOn: $launchAtStartup)
-                    .onChange(of: launchAtStartup) { LoginItem.setEnabled($0) }
+                    .onChange(of: launchAtStartup) { _, enabled in LoginItem.setEnabled(enabled) }
                 Toggle("Show menu bar icon", isOn: $showMenuBarIcon)
                 Text("The menu bar icon shows recording/queue status and quick actions.")
                     .font(.caption).foregroundColor(.secondary)
@@ -688,7 +699,7 @@ struct GeneralSettingsView: View {
 
             Section("Meeting Recording") {
                 Toggle("Offer to record my meetings", isOn: $offerToRecordMeetings)
-                    .onChange(of: offerToRecordMeetings) { enabled in
+                    .onChange(of: offerToRecordMeetings) { _, enabled in
                         if enabled { MeetingMonitor.shared.startMonitoring() }
                         else { MeetingMonitor.shared.stopMonitoring() }
                     }
@@ -759,9 +770,9 @@ struct GeneralSettingsView: View {
 
             Section("Speaker Identities") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Rebuild Speakers from Audio")
+                    Text("Complete Voice Evidence")
                         .font(.headline)
-                    Text("Re-diarizes every recording with FluidAudio and unifies voices across files into stable, nameable speakers. Transcripts are untouched. Run when the queue is idle.")
+                    Text("Fills missing historical voice fingerprints from audio, then refreshes the safety-gated global preview. Names, manual edits, People assignments, pair labels, and transcripts are preserved.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -773,22 +784,20 @@ struct GeneralSettingsView: View {
                         Text(backfill.statusText)
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Button("Pause") { backfill.cancel() }
+                            .controlSize(.small)
                     }
                 } else {
                     HStack {
                         Button {
                             showBackfillConfirmation = true
                         } label: {
-                            Label("Rebuild Speakers…", systemImage: "person.2.wave.2")
+                            Label("Backfill Voice Evidence…", systemImage: "person.2.wave.2")
                         }
-                        .disabled(queue.isProcessing)
                         Spacer()
                     }
                     if let summary = backfill.lastSummary {
                         Text(summary).font(.caption).foregroundColor(.secondary)
-                    } else if queue.isProcessing {
-                        Text("Queue is busy — available when transcription is idle.")
-                            .font(.caption).foregroundColor(.secondary)
                     }
                 }
 
@@ -852,13 +861,13 @@ struct GeneralSettingsView: View {
         } message: {
             Text(errorMessage.isEmpty ? "Failed to clear database. Please try again or restart the app." : errorMessage)
         }
-        .alert("Rebuild Speakers from Audio?", isPresented: $showBackfillConfirmation) {
+        .alert("Complete Missing Voice Evidence?", isPresented: $showBackfillConfirmation) {
             Button("Cancel", role: .cancel) { }
-            Button("Rebuild", role: .destructive) {
+            Button("Start Backfill") {
                 Task { await backfill.run() }
             }
         } message: {
-            Text("This clears the current speaker set (including any names and merges) and rebuilds it by re-diarizing every recording. Transcript text is not affected. This can take a while for large libraries.")
+            Text("AlmRecorder will re-diarize only recordings whose local voices lack acoustic evidence. The operation is resumable and does not clear names, merges, manual/gold assignments, pair labels, or transcript text.")
         }
     }
 
@@ -1037,7 +1046,7 @@ struct TranscriptionSettingsView: View {
     private var currentEngine: String {
         switch modelSettings.transcriptionBackend {
         case .whisper: return "Whisper"
-        case .llm: return modelSettings.selectedLLMEngine.rawValue
+        case .llm: return "Voxtral"
         case .vibeVoice: return "VibeVoice"
         }
     }
@@ -1048,10 +1057,7 @@ struct TranscriptionSettingsView: View {
             return modelSettings.selectedWhisperVariant?.toIdentifier()
                 ?? modelSettings.selectedWhisperModel
         case .llm:
-            switch modelSettings.selectedLLMEngine {
-            case .voxtral: return modelSettings.selectedVoxtralTranscriptionModel
-            case .gemma: return modelSettings.selectedGemmaTranscriptionModel
-            }
+            return modelSettings.selectedVoxtralTranscriptionModel
         case .vibeVoice:
             return modelSettings.selectedVibeVoiceQuantization.displayName
         }
@@ -1196,6 +1202,11 @@ struct MCPSettingsView: View {
     @ObservedObject private var controller = MCPServiceController.shared
     @State private var copied = false
     @State private var confirmRotation = false
+    @State private var showInstallationGuide = false
+    @State private var availableRecordingCount = 0
+    @State private var hiddenRecordingCount = 0
+
+    private let recordingRepository = GRDBRecordingRepository()
 
     private var enabled: Binding<Bool> {
         Binding(
@@ -1218,6 +1229,15 @@ struct MCPSettingsView: View {
         )
     }
 
+    private var clientConfigurationPreview: String {
+        let configuration = controller.clientConfigurationJSON
+        return configuration.replacingOccurrences(
+            of: #"("ALMRECORDER_MCP_TOKEN"\s*:\s*")[^"]*(")"#,
+            with: #"$1<secret token hidden — use Copy configuration>$2"#,
+            options: .regularExpression
+        )
+    }
+
     var body: some View {
         Form {
             Section("Model Context Protocol") {
@@ -1236,6 +1256,21 @@ struct MCPSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Connect an AI agent") {
+                Button {
+                    showInstallationGuide = true
+                } label: {
+                    Label(
+                        "Open setup guide…",
+                        systemImage: "sparkles"
+                    )
+                }
+
+                Text("A guided setup for ChatGPT and Codex, Claude Desktop, Cursor, GitHub Copilot, Visual Studio Code, Antigravity, and other MCP clients.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Client access") {
                 Toggle(
                     "Allow content, notes, comments, summaries, and transcript search",
@@ -1247,9 +1282,31 @@ struct MCPSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Recording privacy") {
+                LabeledContent("Available to MCP") {
+                    Text("\(availableRecordingCount)")
+                        .monospacedDigit()
+                }
+                LabeledContent("Hidden from MCP") {
+                    Text("\(hiddenRecordingCount)")
+                        .monospacedDigit()
+                }
+                Label(
+                    "Individual recordings can be hidden from MCP in their detail view.",
+                    systemImage: "network.slash"
+                )
+                Label(
+                    "Tags can automatically hide every recording carrying that tag.",
+                    systemImage: "tag"
+                )
+                Text("Recording and tag restrictions override every global permission. Hidden recordings are treated as nonexistent across search, resources, meeting notes, comments, writes, and library statistics. MCP clients cannot change privacy-blocking tags.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Client configuration") {
                 ScrollView(.horizontal) {
-                    Text(controller.clientConfigurationJSON)
+                    Text(verbatim: clientConfigurationPreview)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1273,13 +1330,22 @@ struct MCPSettingsView: View {
                     }
                     Spacer()
                 }
-                Text("This configuration contains a secret token. Store it like a password. Rotating the token disconnects existing clients until their configuration is updated.")
+                Text("The secret token is hidden in this preview. Copying includes it, so store the copied configuration like a password. Rotating the token disconnects existing clients until their configuration is updated.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding()
+        .onAppear(perform: refreshPrivacyCounts)
+        .onReceive(
+            NotificationCenter.default.publisher(for: .mcpRecordingPrivacyDidChange)
+        ) { _ in
+            refreshPrivacyCounts()
+        }
+        .sheet(isPresented: $showInstallationGuide) {
+            MCPInstallationGuideView(controller: controller)
+        }
         .confirmationDialog(
             "Rotate MCP token?",
             isPresented: $confirmRotation,
@@ -1292,5 +1358,13 @@ struct MCPSettingsView: View {
         } message: {
             Text("Existing MCP client configurations will stop working.")
         }
+    }
+
+    private func refreshPrivacyCounts() {
+        guard let counts = try? recordingRepository.mcpAvailabilityCounts() else {
+            return
+        }
+        availableRecordingCount = counts.available
+        hiddenRecordingCount = counts.hidden
     }
 }

@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">AlmRecorder small app icon</title>
+  <desc id="description">
+    The approved AlmRecorder mark on a pure-white tile, with an optically
+    simplified microphone crossbar for 16 and 32 pixel raster output.
+  </desc>
+
+  <defs>
+    <filter id="tile-shadow" x="-20%" y="-20%" width="140%" height="145%">
+      <feDropShadow
+        dx="0"
+        dy="18"
+        stdDeviation="24"
+        flood-color="#000000"
+        flood-opacity=".20"
+      />
+    </filter>
+  </defs>
+
+  <rect
+    x="112"
+    y="112"
+    width="800"
+    height="800"
+    rx="184"
+    fill="#FFFFFF"
+    stroke="#D9D9D9"
+    stroke-width="5"
+    filter="url(#tile-shadow)"
+  />
+
+  <g
+    transform="translate(186 271) scale(.88) translate(-132 -194)"
+    shape-rendering="geometricPrecision"
+  >
+    <path
+      transform="translate(0 194) scale(1 .87) translate(0 -194)"
+      d="
+        M132 795
+        H145
+        C174 795 194 747 213 699
+        C221 679 231 673 242 673
+        C253 673 261 682 267 688
+        C273 694 280 692 286 682
+        C294 670 302 638 310 622
+        L488 258
+        C500 220 523 194 555 194
+        H625
+        L580 296
+        L386 695
+        C374 720 355 785 330 813
+        C320 823 306 825 295 821
+        C280 816 271 799 262 783
+        L253 763
+        C249 753 246 741 240 741
+        C234 741 230 751 226 762
+        L216 785
+        C201 811 179 823 151 823
+        H132
+        Z
+      "
+      fill="#859477"
+    />
+
+    <!--
+      At 16–32 px the detailed Yeti reduces to noise. This optical glyph keeps
+      its short horizontal body, sage collar, and a solid support into the
+      charcoal leg. The approved detailed microphone remains in the master.
+    -->
+    <path d="M692 596 H742 L760 642 H692 Z" fill="#859477" />
+    <rect x="520" y="588" width="190" height="66" rx="33" fill="#252824" />
+    <rect x="552" y="588" width="34" height="66" rx="7" fill="#859477" />
+
+    <path
+      transform="translate(0 194) scale(1 .87) translate(0 -194)"
+      d="
+        M613 194
+        H625
+        C641 194 650 204 657 222
+        L865.4 761.3
+        C876 787 874 819 850 819
+        H794
+        C785 819 786 815 778.6 794.7
+        L580 296
+        L613 194
+        Z
+      "
+      fill="#252824"
+    />
+  </g>
+</svg>

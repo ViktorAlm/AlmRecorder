@@ -2,6 +2,26 @@ import Foundation
 import Combine
 import Darwin // For memory tracking
 
+/// Pure retry policy kept separate from process launching so the exact Metal-OOM transition is
+/// deterministic and unit-testable without forcing a machine into memory pressure.
+enum VoxtralMemoryFallback {
+    static func run(
+        runSettings: RunSettings?,
+        onFallback: () async -> Void,
+        attempt: (RunSettings?) async throws -> String
+    ) async throws -> String {
+        do {
+            return try await attempt(runSettings)
+        } catch let error as TranscriptionError {
+            guard case .gpuOutOfMemory = error else { throw error }
+            let originalSettings = runSettings ?? .defaultSettings
+            guard originalSettings.gpuLayers != 0 else { throw error }
+            await onFallback()
+            return try await attempt(originalSettings.withGpuLayers(0))
+        }
+    }
+}
+
 /// Main orchestrator for Voxtral transcription services
 class VoxtralCppService: ObservableObject {
     
@@ -229,7 +249,7 @@ class VoxtralCppService: ObservableObject {
                         }
                         
                         // Transcribe chunk with context and progress handler
-                        let chunkOutput = try await processRunner.runTranscription(
+                        let chunkOutput = try await runTranscriptionWithCPUFallback(
                             modelPath: modelPath.path,
                             mmprojPath: mmprojPath.path,
                             audioPath: wavFile,
@@ -304,7 +324,7 @@ class VoxtralCppService: ObservableObject {
                                     }
                                     
                                     // Retry the transcription
-                                    let retryOutput = try await processRunner.runTranscription(
+                                    let retryOutput = try await runTranscriptionWithCPUFallback(
                                         modelPath: modelPath.path,
                                         mmprojPath: mmprojPath.path,
                                         audioPath: wavPath,
@@ -414,7 +434,7 @@ class VoxtralCppService: ObservableObject {
                 // Run transcription with clear prompt for single file
                 await updateTranscriptionStatus("Running AI transcription model...", progress: 0.5)
                 let contextPrompt = "Transcribe the following audio verbatim. Output only the transcription without any explanations, notes, or commentary:"
-                let rawOutput = try await processRunner.runTranscription(
+                let rawOutput = try await runTranscriptionWithCPUFallback(
                     modelPath: modelPath.path,
                     mmprojPath: mmprojPath.path,
                     audioPath: wavFile,
@@ -475,6 +495,44 @@ class VoxtralCppService: ObservableObject {
             self.transcriptionProgress = progress
         }
         logger.debug("Status: \(status) (\(Int(progress * 100))%)")
+    }
+
+    /// Full Metal offload is fastest, but the audio projector can exceed the remaining unified
+    /// memory even after the launch gate admits the on-disk model estimate. The process runner
+    /// reports that condition as a typed OOM. Retry the same chunk exactly once with language-model
+    /// layers on CPU; this keeps an admitted user transcription working instead of re-launching the
+    /// same doomed Metal configuration forever. Other failures and an explicit CPU run propagate.
+    private func runTranscriptionWithCPUFallback(
+        modelPath: String,
+        mmprojPath: String,
+        audioPath: String,
+        contextPrompt: String?,
+        progressHandler: ((String) -> Void)?,
+        runSettings: RunSettings?
+    ) async throws -> String {
+        try await VoxtralMemoryFallback.run(
+            runSettings: runSettings,
+            onFallback: {
+                self.logger.warning(
+                    "Voxtral Metal OOM; retrying this audio chunk with CPU model layers"
+                )
+                await self.updateTranscriptionStatus(
+                    "GPU memory limit reached; retrying on CPU...",
+                    progress: 0.5
+                )
+                progressHandler?("GPU memory limit reached; retrying on CPU...")
+            },
+            attempt: { attemptSettings in
+                try await self.processRunner.runTranscription(
+                    modelPath: modelPath,
+                    mmprojPath: mmprojPath,
+                    audioPath: audioPath,
+                    contextPrompt: contextPrompt,
+                    progressHandler: progressHandler,
+                    runSettings: attemptSettings
+                )
+            }
+        )
     }
     
     /// Transcribe multiple audio chunks

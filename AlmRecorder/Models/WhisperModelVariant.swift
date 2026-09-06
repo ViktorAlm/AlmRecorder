@@ -10,7 +10,7 @@ enum WhisperModelFamily: String, CaseIterable, Codable {
     var baseURL: String {
         switch self {
         case .openai, .distilWhisper:
-            return "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+            return "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/"
         case .kblab:
             return "https://huggingface.co/KBLab/"
         }
@@ -251,7 +251,7 @@ struct WhisperModelVariant: Codable, Hashable, Identifiable, Comparable, Equatab
         
         // TinyDiarize models are hosted on a different repository
         if version == .tdrz {
-            urlString = "https://huggingface.co/akashmjn/tinydiarize-whisper.cpp/resolve/main/\(filename)"
+            urlString = "https://huggingface.co/akashmjn/tinydiarize-whisper.cpp/resolve/d44ba793fc67e509623a88a409723311fa677744/\(filename)"
             return URL(string: urlString)
         }
         
@@ -262,7 +262,14 @@ struct WhisperModelVariant: Codable, Hashable, Identifiable, Comparable, Equatab
         case .kblab:
             // KBLab models have different URL structure
             let modelName = "kb-whisper-\(size.rawValue)"
-            urlString = "\(family.baseURL)\(modelName)/resolve/main/\(filename)"
+            let revision: String
+            switch size {
+            case .large: revision = "d5d5984b4d8f7c4847a8ea203f1976285fb28300"
+            case .medium: revision = "0abe10b9d7f75d0902656e5c06c5c4d549604dc5"
+            case .small: revision = "3564d61a42fc210ceaa55a22a96dd64478959c78"
+            case .base, .tiny: return nil
+            }
+            urlString = "\(family.baseURL)\(modelName)/resolve/\(revision)/\(filename)"
         }
         return URL(string: urlString)
     }

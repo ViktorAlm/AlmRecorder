@@ -100,12 +100,22 @@ final class VibeVoiceRuntimeInstaller: ObservableObject {
     }
 
     private var helperSourceURL: URL? {
-        let bundled = Bundle.main.url(
+        if let packaged = Bundle.main.url(
             forResource: "vibevoice_helper",
             withExtension: "py",
             subdirectory: "Python"
-        )
-        if let bundled { return bundled }
+        ) {
+            return packaged
+        }
+        // Keep Bundle.module lazy: distribution builds intentionally omit the duplicate
+        // AlmRecorder_AlmRecorder.bundle after copying its resources into Bundle.main.
+        if let swiftPMResource = Bundle.module.url(
+            forResource: "vibevoice_helper",
+            withExtension: "py",
+            subdirectory: "Python"
+        ) {
+            return swiftPMResource
+        }
         let development = URL(
             fileURLWithPath: "\(DevPaths.repoRoot)/AlmRecorder/Resources/Python/vibevoice_helper.py"
         )

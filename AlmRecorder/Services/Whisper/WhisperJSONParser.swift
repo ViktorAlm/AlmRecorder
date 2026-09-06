@@ -19,6 +19,12 @@ struct WhisperDetailedTranscription {
     let text: String
     let tokenStats: WhisperTokenStats?
     let timedSegments: [WhisperTimedSegment]
+    /// Language selected by Whisper from the audio. This comes from the `result.language`
+    /// field in the `-ojf` sidecar, never from inspecting the generated transcript.
+    let detectedLanguage: String?
+    /// Probability printed by whisper.cpp when `language=auto`. Explicitly selected languages
+    /// legitimately have no detection confidence.
+    let detectedLanguageConfidence: Float?
 }
 
 struct WhisperTimedSegment: Codable, Equatable {
@@ -26,6 +32,82 @@ struct WhisperTimedSegment: Codable, Equatable {
     let startTime: TimeInterval
     let endTime: TimeInterval
     let tokenStats: WhisperTokenStats?
+}
+
+struct WhisperLanguageObservation: Equatable {
+    let code: String
+    let confidence: Float?
+    let duration: TimeInterval
+}
+
+struct WhisperLanguageResolution: Equatable {
+    let code: String
+    let confidence: Float?
+    let source: String
+}
+
+/// Resolves the recording-level language without reading generated words. Whisper performs
+/// language ID once per VAD invocation, so an auto-language recording can have several
+/// observations. Duration voting makes a tiny uncertain utterance unable to override the
+/// dominant language of the meeting.
+enum WhisperLanguageResolver {
+    static func resolve(
+        requestedLanguage: String?,
+        observations: [WhisperLanguageObservation]
+    ) -> WhisperLanguageResolution? {
+        let requested = requestedLanguage?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let requested,
+           !requested.isEmpty,
+           requested != "auto",
+           requested != "auto-detected",
+           requested != "unknown" {
+            return WhisperLanguageResolution(
+                code: requested,
+                confidence: nil,
+                source: "user_selected"
+            )
+        }
+
+        let valid = observations.compactMap { observation -> WhisperLanguageObservation? in
+            let code = observation.code
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard !code.isEmpty, code != "auto", observation.duration > 0 else { return nil }
+            return WhisperLanguageObservation(
+                code: code,
+                confidence: observation.confidence,
+                duration: observation.duration
+            )
+        }
+        guard !valid.isEmpty else { return nil }
+
+        let durationByLanguage = Dictionary(grouping: valid, by: \.code).mapValues {
+            $0.reduce(0) { $0 + $1.duration }
+        }
+        guard let winner = durationByLanguage.max(by: { $0.value < $1.value })?.key else {
+            return nil
+        }
+        let winningObservations = valid.filter { $0.code == winner }
+        let confidencePairs = winningObservations.compactMap { observation -> (Float, Double)? in
+            observation.confidence.map { ($0, observation.duration) }
+        }
+        let confidenceWeight = confidencePairs.reduce(0.0) { $0 + $1.1 }
+        let confidence: Float? = confidenceWeight > 0
+            ? Float(
+                confidencePairs.reduce(0.0) {
+                    $0 + Double($1.0) * $1.1
+                } / confidenceWeight
+            )
+            : nil
+
+        return WhisperLanguageResolution(
+            code: winner,
+            confidence: confidence,
+            source: "whisper_audio"
+        )
+    }
 }
 
 /// Parses the sidecar JSON file written by `whisper-cli -ojf`.
@@ -81,6 +163,36 @@ enum WhisperJSONParser {
 
     static func parseStats(_ data: Data) -> WhisperTokenStats? {
         parseTokens(data).flatMap(stats(from:))
+    }
+
+    /// Reads the language Whisper actually selected from the audio. `params.language` is only the
+    /// request (`auto`, `sv`, ...); `result.language` is the resolved language and is the value
+    /// AlmRecorder must persist.
+    static func parseDetectedLanguage(_ data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any],
+              let rawLanguage = result["language"] as? String else {
+            return nil
+        }
+        let language = rawLanguage.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return language.isEmpty || language == "auto" ? nil : language
+    }
+
+    /// whisper.cpp prints the probability only to stderr:
+    /// `auto-detected language: sv (p = 0.998123)`.
+    static func parseDetectedLanguageLog(_ output: String) -> (code: String, confidence: Float)? {
+        let pattern = #"auto-detected language:\s*([A-Za-z-]+)\s*\(p\s*=\s*([0-9]*\.?[0-9]+)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                in: output,
+                range: NSRange(output.startIndex..., in: output)
+              ),
+              let codeRange = Range(match.range(at: 1), in: output),
+              let confidenceRange = Range(match.range(at: 2), in: output),
+              let confidence = Float(output[confidenceRange]) else {
+            return nil
+        }
+        return (String(output[codeRange]).lowercased(), confidence)
     }
 
     /// Parses whisper's millisecond `offsets` into timestamped text segments. With `-ml 1`

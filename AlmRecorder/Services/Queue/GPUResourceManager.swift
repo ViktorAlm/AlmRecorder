@@ -4,14 +4,17 @@ import Combine
 /// GPU/Metal consumers, lowest→highest priority. A higher-priority consumer preempts a lower one.
 /// (Raw values define the ordering; do not reuse.)
 enum GPUConsumer: Int, Comparable, CaseIterable, CustomStringConvertible {
-    case identityReview = -3 // SpeakerIdentityLLMReviewer Gemma passes — distinct from `insights`
+    case identityReview = -5 // SpeakerIdentityLLMReviewer Gemma passes — distinct from `insights`
                              // so the two NEVER both acquire the GPU (they share LLMTextService;
                              // a shared case would let both spawn Gemma → dual-resident OOM).
-    case cleanup = -2      // transcript cleanup (Gemma audio verification) — yields even to insights
-    case insights = -1     // background LLM insights — yields to everything user-facing
-    case embedding = 0
+    case cleanup = -4      // transcript cleanup — yields even to insights
+    case insights = -3     // background LLM insights — yields to everything user-facing
+    case speakerEvidenceBackfill = -2 // resumable FluidAudio evidence repair for legacy voices
+    case embedding = -1    // background indexing must never interrupt a requested quality run
+    case nightlyEnhancement = 0 // VibeVoice candidate + persistent Gemma finalization
     case transcription = 1
     case search = 2
+    case dictation = 3       // foreground hold-to-talk; model is released before lower work resumes
 
     static func < (lhs: GPUConsumer, rhs: GPUConsumer) -> Bool { lhs.rawValue < rhs.rawValue }
 
@@ -20,9 +23,12 @@ enum GPUConsumer: Int, Comparable, CaseIterable, CustomStringConvertible {
         case .identityReview: return "identityReview"
         case .cleanup: return "cleanup"
         case .insights: return "insights"
+        case .speakerEvidenceBackfill: return "speakerEvidenceBackfill"
+        case .nightlyEnhancement: return "nightlyEnhancement"
         case .embedding: return "embedding"
         case .transcription: return "transcription"
         case .search: return "search"
+        case .dictation: return "dictation"
         }
     }
 }
@@ -38,6 +44,7 @@ enum GPUConsumer: Int, Comparable, CaseIterable, CustomStringConvertible {
 struct GPUArbiter {
     enum Effect: Hashable {
         case proceed(GPUConsumer)        // requester holds the GPU now — no suspension
+        case rejectDuplicate(GPUConsumer) // a second worker of the holder must not share its lease
         case suspend(GPUConsumer)        // requester must park until a later grant
         case preemptHolder(GPUConsumer)  // stop + kill the current holder's in-flight work
         case resume(GPUConsumer)         // wake a parked (suspended) consumer; it becomes holder
@@ -57,7 +64,12 @@ struct GPUArbiter {
             holder = c
             return [.proceed(c)]
         }
-        if current == c { return [.proceed(c)] }   // defensive re-entrancy
+        if current == c {
+            // Consumer cases identify queues, not individual tasks. Treating this as re-entrancy
+            // let duplicate cleanup workers share one logical lease and load two 8 GiB Gemma
+            // instances concurrently.
+            return [.rejectDuplicate(c)]
+        }
         suspended.insert(c)
         if c > current {
             preempted.insert(current)       // it will be stopped; remember to bring it back
@@ -128,22 +140,27 @@ final class GPUResourceManager: ObservableObject {
 
     /// Background (deferrable) consumers, as opposed to user-initiated `.transcription`/`.search` —
     /// matches `SystemMemoryGate`'s own "only background queues consult it" contract.
-    private static let backgroundConsumers: [GPUConsumer] = [.identityReview, .cleanup, .insights, .embedding]
+    private static let backgroundConsumers: [GPUConsumer] = [
+        .identityReview,
+        .cleanup,
+        .insights,
+        .speakerEvidenceBackfill,
+        .nightlyEnhancement,
+        .embedding
+    ]
 
     private init() {
-        // The per-job SystemMemoryGate.deferral check only blocks a queue from STARTING a new job —
-        // it does nothing for one already resident. On 2026-07-07 `embedding` acquired the GPU while
-        // memory was fine, pressure then climbed to `.warning` mid-job, and nothing stopped it: the
-        // process went completely silent for ~75s and was killed. Stop every background consumer the
-        // moment pressure gets worse so none of them keeps a multi-GB model resident into a worsening
-        // squeeze; each one requeues its job as `.pending` and self-defers via the gate on restart.
+        // New heavy launches already defer at warning. Let one previously admitted model finish
+        // through ordinary compressor/pager activity; its own live monitor still stops below 1 GB
+        // headroom, above the compressor/swap ceilings, on Metal OOM, or at critical pressure.
+        // Killing at warning caused an endless load → warning → kill cycle on a 24 GB Mac.
         SystemMemoryGate.shared.onPressureEscalated = { [weak self] level in
+            guard level == .critical else { return }
             Task { @MainActor in self?.stopAllBackgroundConsumers(reason: level) }
         }
     }
 
-    /// System memory pressure just got worse: proactively stop every background GPU consumer
-    /// instead of waiting for whichever one is in flight to finish on its own.
+    /// Critical system memory pressure overrides every background lease.
     private func stopAllBackgroundConsumers(reason level: MemoryPressureLevel) {
         logger.warning("[GPUResource] Memory pressure → \(level.rawValue): stopping all background GPU consumers")
         for consumer in Self.backgroundConsumers {
@@ -154,7 +171,12 @@ final class GPUResourceManager: ObservableObject {
     /// Acquire the GPU, suspending until granted. Returns `false` if the calling task was cancelled
     /// while waiting (the caller then must NOT run GPU work and must NOT call `release`).
     func acquire(_ consumer: GPUConsumer) async -> Bool {
-        execute(arbiter.acquire(consumer))
+        let effects = arbiter.acquire(consumer)
+        if effects.contains(.rejectDuplicate(consumer)) {
+            execute(effects)
+            return false
+        }
+        execute(effects)
         if arbiter.holder == consumer { return true }   // GPU was free — proceeded immediately
 
         let granted = await withTaskCancellationHandler {
@@ -195,6 +217,8 @@ final class GPUResourceManager: ObservableObject {
             switch effect {
             case let .proceed(c):
                 logger.info("[GPUResource] Acquired by \(c)")
+            case let .rejectDuplicate(c):
+                logger.error("[GPUResource] Rejected duplicate \(c) worker — existing lease remains exclusive")
             case .suspend:
                 break   // parking handled in `acquire`
             case let .preemptHolder(h):
@@ -247,9 +271,14 @@ final class GPUResourceManager: ObservableObject {
         case .identityReview: LLMTextService.shared.cancel()   // kill its in-flight Gemma call
         case .cleanup:       TranscriptCleanupQueueManager.shared.stopProcessing()
         case .insights:      RecordingInsightsQueueManager.shared.stopProcessing()
+        case .speakerEvidenceBackfill:
+            SpeakerBackfillService.shared.stopProcessingForPreemption()
+        case .nightlyEnhancement:
+            NightlyQualityController.shared.stopProcessingForPreemption()
         case .embedding:     EmbeddingQueueManager.shared.stopProcessing()
         case .transcription: TranscriptionQueueManager.shared.pauseAllProcessing()
-        case .search:        break   // search is highest priority; never preempted
+        case .search:        break   // no persistent search worker to stop
+        case .dictation:     break   // highest priority; cannot be preempted
         }
     }
 
@@ -258,12 +287,17 @@ final class GPUResourceManager: ObservableObject {
         case .identityReview: break   // ad-hoc reviewer; re-runs on its next scheduled pass
         case .cleanup:       TranscriptCleanupQueueManager.shared.startProcessing()
         case .insights:      RecordingInsightsQueueManager.shared.startProcessing()
+        case .speakerEvidenceBackfill:
+            SpeakerBackfillService.shared.resumeAfterPreemption()
+        case .nightlyEnhancement:
+            NightlyQualityController.shared.resumeAfterPreemption()
         case .embedding:     EmbeddingQueueManager.shared.startProcessing()
         // Must force-clear the stuck `isProcessing` flag: `pauseAllProcessing` (the stop hook)
         // cancels the workers but never clears it, so `resumeAllProcessing`'s `if !isProcessing`
         // guard is dead and the transcription queue would never respawn a worker after a preempt.
         case .transcription: TranscriptionQueueManager.shared.startOrResumeProcessing()
         case .search:        break
+        case .dictation:     break
         }
     }
 }

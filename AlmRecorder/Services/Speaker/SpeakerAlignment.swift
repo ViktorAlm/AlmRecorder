@@ -119,6 +119,10 @@ private struct SpeakerTextSegmentationPolicy {
     let maximumWords: Int?
     let sentenceBreakAfter: TimeInterval?
     let splitOnAcousticContextChange: Bool
+    /// A diarizer can leave a short coverage hole inside one continuous turn. When the same
+    /// speaker is assigned immediately before and after an otherwise non-overlapping hole, carry
+    /// that label across the hole so a few unassigned ASR words do not fragment the transcript.
+    let maximumUnassignedBridgeDuration: TimeInterval
 
     static func policy(for mode: SpeakerUtteranceSegmentation) -> Self {
         switch mode {
@@ -128,15 +132,17 @@ private struct SpeakerTextSegmentationPolicy {
                 maximumDuration: nil,
                 maximumWords: nil,
                 sentenceBreakAfter: nil,
-                splitOnAcousticContextChange: false
+                splitOnAcousticContextChange: false,
+                maximumUnassignedBridgeDuration: 5
             )
         case .readable:
             return SpeakerTextSegmentationPolicy(
-                maximumMergeGap: 0.75,
-                maximumDuration: 18,
-                maximumWords: 48,
-                sentenceBreakAfter: 7,
-                splitOnAcousticContextChange: true
+                maximumMergeGap: 2.0,
+                maximumDuration: 60,
+                maximumWords: 160,
+                sentenceBreakAfter: 25,
+                splitOnAcousticContextChange: true,
+                maximumUnassignedBridgeDuration: 8
             )
         case .speakerSafe:
             return SpeakerTextSegmentationPolicy(
@@ -144,7 +150,8 @@ private struct SpeakerTextSegmentationPolicy {
                 maximumDuration: 10,
                 maximumWords: 28,
                 sentenceBreakAfter: 4,
-                splitOnAcousticContextChange: true
+                splitOnAcousticContextChange: true,
+                maximumUnassignedBridgeDuration: 1.5
             )
         }
     }
@@ -324,7 +331,9 @@ enum SpeakerAlignment {
                 maximumDuration: segmentationPolicy.maximumDuration,
                 maximumWords: segmentationPolicy.maximumWords,
                 sentenceBreakAfter: segmentationPolicy.sentenceBreakAfter,
-                splitOnAcousticContextChange: segmentationPolicy.splitOnAcousticContextChange
+                splitOnAcousticContextChange: segmentationPolicy.splitOnAcousticContextChange,
+                maximumUnassignedBridgeDuration:
+                    segmentationPolicy.maximumUnassignedBridgeDuration
             )
         }
         let alignmentInputs = utteranceSegmentation == .legacyCoalesced
@@ -342,7 +351,7 @@ enum SpeakerAlignment {
             .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.startTime != $1.startTime ? $0.startTime < $1.startTime : $0.endTime < $1.endTime }
 
-        var aligned: [SpeakerAlignedTextSegment] = []
+        var assigned: [SpeakerAlignedTextSegment] = []
         for segment in ordered {
             let start = globalOffset + segment.startTime
             let end = globalOffset + max(segment.startTime, segment.endTime)
@@ -387,7 +396,15 @@ enum SpeakerAlignment {
                 activeSpeakerCount: overlap.maximumActiveSpeakerCount,
                 overlappingSpeakers: overlap.speakerLabels
             )
+            assigned.append(next)
+        }
 
+        let bridged = bridgeUnassignedSpeakerGaps(
+            assigned,
+            policy: segmentationPolicy
+        )
+        var aligned: [SpeakerAlignedTextSegment] = []
+        for next in bridged {
             if let lastIndex = aligned.indices.last,
                shouldMerge(
                    aligned[lastIndex],
@@ -426,6 +443,68 @@ enum SpeakerAlignment {
             }
         }
         return aligned
+    }
+
+    /// Interpolate only high-confidence diarization coverage holes. This is deliberately narrower
+    /// than nearest-speaker filling: both sides must exist, must agree on the same speaker, the
+    /// unassigned run must be short, and none of its ASR spans may contain overlapping-speaker
+    /// evidence. A genuine speaker transition therefore remains a hard boundary.
+    private static func bridgeUnassignedSpeakerGaps(
+        _ segments: [SpeakerAlignedTextSegment],
+        policy: SpeakerTextSegmentationPolicy
+    ) -> [SpeakerAlignedTextSegment] {
+        guard segments.count >= 3 else { return segments }
+        var result = segments
+        var index = 0
+
+        while index < result.count {
+            guard result[index].speaker == nil else {
+                index += 1
+                continue
+            }
+
+            let runStart = index
+            while index < result.count, result[index].speaker == nil {
+                index += 1
+            }
+            let runEnd = index
+            guard runStart > 0, runEnd < result.count,
+                  let leftSpeaker = result[runStart - 1].speaker,
+                  leftSpeaker == result[runEnd].speaker else {
+                continue
+            }
+
+            let runDuration = max(
+                0,
+                result[runEnd - 1].endTime - result[runStart].startTime
+            )
+            let leftGap = max(
+                0,
+                result[runStart].startTime - result[runStart - 1].endTime
+            )
+            let rightGap = max(
+                0,
+                result[runEnd].startTime - result[runEnd - 1].endTime
+            )
+            guard runDuration <= policy.maximumUnassignedBridgeDuration,
+                  leftGap <= policy.maximumMergeGap,
+                  rightGap <= policy.maximumMergeGap,
+                  result[runStart..<runEnd].allSatisfy({
+                      $0.activeSpeakerCount <= 1 && $0.overlappingSpeakers.isEmpty
+                  }) else {
+                continue
+            }
+
+            let embedding = result[runStart - 1].embedding
+                ?? result[runEnd].embedding
+            for holeIndex in runStart..<runEnd {
+                result[holeIndex].speaker = leftSpeaker
+                if result[holeIndex].embedding == nil {
+                    result[holeIndex].embedding = embedding
+                }
+            }
+        }
+        return result
     }
 
     /// Produces one normalized embedding per local diarization cluster with a selectable

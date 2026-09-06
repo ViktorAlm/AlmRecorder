@@ -42,12 +42,18 @@ class VoxtralModelManager: ObservableObject {
             return false
         }
         
-        // Validate file sizes (models should be at least 100MB, mmproj at least 10MB)
+        // Reject partial files; catalog sizes are estimates, so use the shared conservative floor.
         if let modelAttrs = try? FileManager.default.attributesOfItem(atPath: modelPath.path),
            let modelSize = modelAttrs[.size] as? Int64,
            let mmprojAttrs = try? FileManager.default.attributesOfItem(atPath: mmprojPath.path),
            let mmprojSize = mmprojAttrs[.size] as? Int64 {
-            return modelSize > 100_000_000 && mmprojSize > 10_000_000
+            return UnifiedDownloadQueue.isAcceptableFileSize(
+                modelSize,
+                declaredSize: Int64(config.sizeGB * 1_000_000_000)
+            ) && UnifiedDownloadQueue.isAcceptableFileSize(
+                mmprojSize,
+                declaredSize: Int64(config.mmprojSizeGB * 1_000_000_000)
+            )
         }
         
         return false
@@ -104,7 +110,13 @@ class VoxtralModelManager: ObservableObject {
         let mmprojPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
         
         // Prepare additional files for download
-        let additionalFiles = [(url: URL(string: config.mmprojURL)!, path: mmprojPath)]
+        let additionalFiles = [
+            UnifiedDownloadQueue.AdditionalDownload(
+                url: URL(string: config.mmprojURL)!,
+                path: mmprojPath,
+                fileSize: Int64(config.mmprojSizeGB * 1_000_000_000)
+            )
+        ]
         
         // Use UnifiedDownloadQueue
         UnifiedDownloadQueue.shared.enqueueDownload(
@@ -125,7 +137,14 @@ class VoxtralModelManager: ObservableObject {
         }
         
         // Wait for download to complete
-        await waitForDownload("voxtral-\(modelKey)")
+        guard await waitForDownload("voxtral-\(modelKey)") else {
+            throw TranscriptionError.downloadFailed
+        }
+        // The projector is queued only after the primary GGUF completes. Do not report the model
+        // ready while that required second file is still downloading.
+        guard await waitForDownload("voxtral-\(modelKey)-additional") else {
+            throw TranscriptionError.downloadFailed
+        }
         
         // Check if download succeeded
         if isModelDownloaded(modelKey) {
@@ -222,8 +241,8 @@ class VoxtralModelManager: ObservableObject {
     }
     
     /// Wait for a model to finish downloading
-    private func waitForDownload(_ modelId: String) async {
-        let maxWaitTime: TimeInterval = 3600 // 1 hour
+    private func waitForDownload(_ modelId: String) async -> Bool {
+        let maxWaitTime: TimeInterval = 8 * 60 * 60
         let checkInterval: TimeInterval = 1.0
         let startTime = Date()
         
@@ -237,14 +256,17 @@ class VoxtralModelManager: ObservableObject {
                             isDownloading = false
                             downloadProgress = 1.0
                         }
-                        return
+                        return true
                     } else if task.state == .failed {
                         await MainActor.run {
                             isDownloading = false
                             downloadProgress = 0.0
                         }
-                        return
+                        return false
                     }
+                } else if Date().timeIntervalSince(startTime) >= 5 {
+                    logger.error("Download task was never created: \(modelId)")
+                    return false
                 }
             }
             
@@ -256,7 +278,13 @@ class VoxtralModelManager: ObservableObject {
             }
             
             // Wait before checking again
-            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            } catch {
+                return false
+            }
         }
+        logger.error("Download timed out: \(modelId)")
+        return false
     }
 }

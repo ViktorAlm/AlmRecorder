@@ -28,7 +28,7 @@ struct LiveWaveformView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
         }
-        .onChange(of: level) { newValue in
+        .onChange(of: level) { _, newValue in
             history.append(CGFloat(min(1, max(0, newValue))))
             if history.count > bars { history.removeFirst(history.count - bars) }
         }

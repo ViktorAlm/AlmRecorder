@@ -1,64 +1,117 @@
 import Foundation
 
-/// Central configuration for the Gemma 4 LLM engine.
+/// Central configuration for Gemma 4 text generation and audio-grounded nightly consensus.
 ///
-/// Gemma 4 (Google, 2026) is an encoder-free multimodal model. For transcription it runs through the
-/// SAME `llama-mtmd-cli --audio --mmproj` path as Voxtral, but with a non-greedy sampler + `--jinja`
-/// chat template, a BF16-only mmproj (the audio Conformer is precision-sensitive), and <=30s audio
-/// chunks. The same GGUF weights also serve as a general text LLM (see LLMTextService) — no extra
-/// download. Weights: https://huggingface.co/unsloth/gemma-4-12b-it-GGUF and .../gemma-4-E4B-it-GGUF
+/// Ordinary summaries and insights still use `LLMTextService`. The nightly quality pass uses the
+/// current llama.cpp server multimodal API with a selected audio-capable model and its projector.
 struct GemmaConfiguration {
+
+    #if false
+    // DEFERRED: Gemma audio-ASR prompt. No live code may invoke it.
+    /// Canonical Gemma 4 ASR instruction published by Google. Keep one source of truth so direct
+    /// Gemma transcription and the nightly blind benchmark cannot silently drift apart.
+    static func canonicalASRPrompt(language: String?) -> String {
+        let value = language?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalized = value.lowercased()
+        let firstLine: String
+        if value.isEmpty
+            || normalized == "auto"
+            || normalized == "auto-detected"
+            || normalized == "unknown" {
+            firstLine = "Transcribe the following speech segment in its original language."
+        } else {
+            firstLine = "Transcribe the following speech segment in \(value) into \(value) text."
+        }
+        return """
+        \(firstLine)
+
+        Follow these specific instructions for formatting the answer:
+        * Only output the transcription, with no newlines.
+        * When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three.
+        """
+    }
+    #endif
 
     // MARK: - Model catalog
 
-    /// Available Gemma models. Keys are `<size>-<quant>`. Each 12B/E4B family shares one BF16 mmproj;
-    /// the two families' projectors are different files, so they get distinct LOCAL names even though
-    /// both repos publish `mmproj-BF16.gguf`.
+    /// Available Gemma GGUFs. Audio-consensus entries download and validate their matching mmproj;
+    /// every entry remains usable as a text-only summary/insight model.
     static let models: [String: LLMModelConfig] = [
         "12B-Q4_K_M": LLMModelConfig(
             name: "Gemma 4 12B Q4_K_M",
             modelFile: "gemma-4-12b-it-Q4_K_M.gguf",
             mmprojFile: "mmproj-gemma-4-12b-it-BF16.gguf",
-            modelURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q4_K_M.gguf",
-            mmprojURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-BF16.gguf",
-            sizeGB: 7.12
+            modelURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/gemma-4-12b-it-Q4_K_M.gguf",
+            mmprojURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/mmproj-BF16.gguf",
+            sizeGB: 7.12,
+            mmprojSizeGB: 0.175
         ),
         "12B-Q5_K_M": LLMModelConfig(
             name: "Gemma 4 12B Q5_K_M",
             modelFile: "gemma-4-12b-it-Q5_K_M.gguf",
             mmprojFile: "mmproj-gemma-4-12b-it-BF16.gguf",
-            modelURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q5_K_M.gguf",
-            mmprojURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-BF16.gguf",
-            sizeGB: 8.41
+            modelURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/gemma-4-12b-it-Q5_K_M.gguf",
+            mmprojURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/mmproj-BF16.gguf",
+            sizeGB: 8.41,
+            mmprojSizeGB: 0.175
         ),
         "12B-Q8_0": LLMModelConfig(
             name: "Gemma 4 12B Q8_0 (8-bit)",
             modelFile: "gemma-4-12b-it-Q8_0.gguf",
             mmprojFile: "mmproj-gemma-4-12b-it-BF16.gguf",
-            modelURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q8_0.gguf",
-            mmprojURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-BF16.gguf",
-            sizeGB: 12.67
+            modelURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/gemma-4-12b-it-Q8_0.gguf",
+            mmprojURL: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/fc034cfff751157913579611efad8462ac1be606/mmproj-BF16.gguf",
+            sizeGB: 12.67,
+            mmprojSizeGB: 0.175
         ),
         "E4B-Q4_K_M": LLMModelConfig(
-            name: "Gemma 4 E4B Q4_K_M (light)",
+            name: "Gemma 4 E4B Q4_K_M (audio consensus)",
             modelFile: "gemma-4-E4B-it-Q4_K_M.gguf",
-            mmprojFile: "mmproj-gemma-4-E4B-it-BF16.gguf",
-            modelURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf",
-            mmprojURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-BF16.gguf",
-            sizeGB: 2.7
+            mmprojFile: "mmproj-gemma-4-E4B-it-F16.gguf",
+            modelURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/gemma-4-E4B-it-Q4_K_M.gguf",
+            mmprojURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/mmproj-gemma-4-E4B-it-F16.gguf",
+            sizeGB: 5.95,
+            mmprojSizeGB: 0.990
         ),
         "E4B-Q8_0": LLMModelConfig(
             name: "Gemma 4 E4B Q8_0 (light, 8-bit)",
             modelFile: "gemma-4-E4B-it-Q8_0.gguf",
             mmprojFile: "mmproj-gemma-4-E4B-it-BF16.gguf",
-            modelURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf",
-            mmprojURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-BF16.gguf",
-            sizeGB: 4.5
+            modelURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/gemma-4-E4B-it-Q8_0.gguf",
+            mmprojURL: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/mmproj-BF16.gguf",
+            sizeGB: 4.5,
+            mmprojSizeGB: 0.175
         ),
     ]
 
-    /// Default model used for transcription and text generation.
+    /// Default text-generation model.
     static let defaultModel = "12B-Q5_K_M"
+    /// Maximum-quality default for audio-grounded consensus. Admission remains conservative: a
+    /// 24 GB Mac may run 12B only when enough live headroom exists.
+    static let defaultAudioModel = "12B-Q5_K_M"
+    static let safeAudioModel = "E4B-Q4_K_M"
+    static let audioConsensusModelKeys = [
+        "12B-Q5_K_M",
+        "12B-Q4_K_M",
+        "E4B-Q4_K_M"
+    ]
+
+    static func isAudioConsensusModel(_ key: String) -> Bool {
+        audioConsensusModelKeys.contains(key)
+    }
+
+    static func validatedAudioModelKey(_ key: String?) -> String {
+        guard let key, isAudioConsensusModel(key) else { return defaultAudioModel }
+        return key
+    }
+
+    static let audioSampleRate: Double = 16_000
+    static let audioChannels = 1
+    /// Gemma 4 documents a maximum of 30 seconds per audio item. Leave room for edge padding.
+    static let maximumAudioClipDuration: TimeInterval = 29
+    static let targetAudioClipDuration: TimeInterval = 24
+    static let maximumAudioClipsPerRequest = 3
 
     // MARK: - Paths
 
@@ -68,7 +121,8 @@ struct GemmaConfiguration {
         return appSupport.appendingPathComponent("AlmRecorder/GemmaModels")
     }
 
-    // MARK: - Audio settings
+    #if false
+    // MARK: - DEFERRED audio settings and transcription parameters
 
     static let audioSampleRate: Double = 16000
     static let audioChannels: Int = 1
@@ -89,16 +143,21 @@ struct GemmaConfiguration {
     /// Gemma audio transcription args for `llama-mtmd-cli`. Differs from Voxtral: non-greedy sampler
     /// (`--temp 1.0 --top-k 64 --top-p 0.95`) and `--jinja` for the Gemma chat template.
     struct ProcessParameters: LLMTranscriptionParameters {
-        let defaultPrompt = "Transcribe this audio exactly. Output only the transcription, with no comments, notes, or formatting."
+        let defaultPrompt = GemmaConfiguration.canonicalASRPrompt(language: nil)
         let gpuLayers = "99"
         let temperature = "1.0"
         let topK = "64"
         let topP = "0.95"
-        let maxTokens = "15000"
+        let maxTokens = "512"
+        /// llama.cpp replaces this marker with the loaded audio embeddings. Supplying it ourselves
+        /// prevents mtmd-cli's generic single-turn fallback from prepending audio before the text.
+        private let trailingAudioMarker = "<__media__>"
 
         private func sanitized(_ prompt: String?) -> String {
             let p = (prompt ?? defaultPrompt)
-            return p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Transcribe this audio exactly." : p
+            return p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? GemmaConfiguration.canonicalASRPrompt(language: nil)
+                : p
         }
 
         func buildArguments(modelPath: String, mmprojPath: String, audioPath: String, contextPrompt: String?) -> [String] {
@@ -106,7 +165,7 @@ struct GemmaConfiguration {
                 "-m", modelPath,
                 "--mmproj", mmprojPath,
                 "--audio", audioPath,
-                "-p", sanitized(contextPrompt),
+                "-p", sanitized(contextPrompt) + trailingAudioMarker,
                 "-ngl", gpuLayers,
                 "--temp", temperature,
                 "--top-k", topK,
@@ -121,7 +180,7 @@ struct GemmaConfiguration {
                 "-m", modelPath,
                 "--mmproj", mmprojPath,
                 "--audio", audioPath,
-                "-p", sanitized(runSettings.prompt),
+                "-p", sanitized(runSettings.prompt) + trailingAudioMarker,
                 "-ngl", String(runSettings.gpuLayers),
                 "--temp", String(runSettings.temperature),
                 "--top-k", String(runSettings.topK),
@@ -139,11 +198,11 @@ struct GemmaConfiguration {
     }
 
     static let processParameters = ProcessParameters()
+    #endif
 
     // MARK: - Text-generation parameters (llama-cli, no audio/mmproj)
 
-    /// Sampling for text tasks (summaries/topics/tags). Lower temperature than transcription for
-    /// faithful, low-variance output.
+    /// Sampling for text tasks (summaries/topics/tags/consensus).
     struct TextParameters {
         let temperature = "0.4"
         let topP = "0.95"
@@ -156,7 +215,7 @@ struct GemmaConfiguration {
 
     // MARK: - Transcript cleaning
 
-    /// Gemma chat/control tokens to strip from raw transcription output.
+    /// Gemma chat/control tokens to strip from raw text output.
     static let systemTokensToRemove = [
         "<start_of_turn>",
         "<end_of_turn>",
@@ -165,6 +224,7 @@ struct GemmaConfiguration {
         "<pad>",
         "[BLANK_AUDIO]",
         "[INAUDIBLE]",
+        "[end of text]",
     ]
 
     /// Gemma 4 under `--jinja` (llama.cpp ≥ b9493 templates) prefixes replies with a reasoning

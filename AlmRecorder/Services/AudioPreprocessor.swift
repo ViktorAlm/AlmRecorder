@@ -1,5 +1,12 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
+
+/// AVAssetReader/Writer objects are deliberately confined to one dedicated serial queue below.
+/// AVFoundation does not annotate these reference types as Sendable, so carry them into that
+/// queue through an explicit unchecked wrapper that documents the confinement boundary.
+private struct AudioQueueTransfer<Value>: @unchecked Sendable {
+    let value: Value
+}
 
 /// Supported audio formats for conversion
 enum AudioFormat {
@@ -171,9 +178,6 @@ class AudioPreprocessor: ObservableObject {
             throw AudioProcessingError.noAudioTrack
         }
         
-        // Get source format for reference
-        let sourceFormat = try await audioTrack.load(.formatDescriptions).first
-        
         // Configure output settings based on format
         let outputSettings = getOutputSettings(
             for: outputFormat,
@@ -204,14 +208,19 @@ class AudioPreprocessor: ObservableObject {
         writer.startSession(atSourceTime: .zero)
         
         // Process the audio
+        let writerInputTransfer = AudioQueueTransfer(value: writerInput)
+        let readerOutputTransfer = AudioQueueTransfer(value: readerOutput)
+        let writerTransfer = AudioQueueTransfer(value: writer)
         await withCheckedContinuation { continuation in
             writerInput.requestMediaDataWhenReady(on: DispatchQueue(label: "audioProcessing")) {
+                let writerInput = writerInputTransfer.value
+                let readerOutput = readerOutputTransfer.value
                 while writerInput.isReadyForMoreMediaData {
                     if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
                         writerInput.append(sampleBuffer)
                     } else {
                         writerInput.markAsFinished()
-                        writer.finishWriting {
+                        writerTransfer.value.finishWriting {
                             continuation.resume()
                         }
                         break
@@ -366,7 +375,7 @@ class AudioPreprocessor: ObservableObject {
         
         // Check sample rate and channels
         let asset = AVAsset(url: audioURL)
-        if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first {
+        if (try? await asset.loadTracks(withMediaType: .audio).first) != nil {
             // Check if we need to resample or convert to mono
             // This would require analyzing the format descriptions
             return false // For now, assume WAV files are OK

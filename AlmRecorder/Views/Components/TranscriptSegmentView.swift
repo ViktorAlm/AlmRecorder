@@ -11,6 +11,9 @@ struct TranscriptSegmentView: View {
     /// from the speakers table; the empty default still upgrades a clustered line to its stable
     /// global label rather than the per-recording "Speaker N".
     var speakerResolver: SpeakerNameResolver = SpeakerNameResolver()
+    /// Optional context label for the ASR confidence badge. Search uses "ASR" so the percentage
+    /// cannot be mistaken for search relevance.
+    var confidenceLabel: String? = nil
     
     @State private var isPlaying = false
     @StateObject private var player = AudioPlayerViewModel()
@@ -132,7 +135,7 @@ struct TranscriptSegmentView: View {
                 Spacer()
                 
                 if let confidence = utterance.confidence, confidence > 0 {
-                    confidenceBadge(confidence)
+                    confidenceBadge(confidence, label: confidenceLabel)
                 }
             }
             
@@ -316,14 +319,14 @@ struct TranscriptSegmentView: View {
         }
     }
     
-    private func confidenceBadge(_ confidence: Float) -> some View {
+    private func confidenceBadge(_ confidence: Float, label: String?) -> some View {
         let percentage = Int(confidence * 100)
         let color = confidence > 0.8 ? Color.green : confidence > 0.6 ? Color.orange : Color.red
         
         return HStack(spacing: 4) {
             Image(systemName: "chart.bar.fill")
                 .font(.caption2)
-            Text("\(percentage)%")
+            Text(label.map { "\($0) \(percentage)%" } ?? "\(percentage)%")
                 .font(.caption)
                 .fontWeight(.medium)
         }
@@ -332,6 +335,7 @@ struct TranscriptSegmentView: View {
         .padding(.vertical, 2)
         .background(color.opacity(0.15))
         .cornerRadius(4)
+        .help("Transcription confidence, not search relevance")
     }
     
     private func bubbleBackground(isCurrentSpeaker: Bool) -> some View {

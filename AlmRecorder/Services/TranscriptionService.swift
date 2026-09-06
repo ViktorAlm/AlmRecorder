@@ -7,7 +7,6 @@ class TranscriptionService: ObservableObject {
     enum Backend {
         case whisper  // Whisper.cpp (primary)
         case native   // llama.cpp with Voxtral (secondary)
-        case gemma    // llama.cpp with Gemma 4 (secondary)
         case vibeVoice // Microsoft VibeVoice-ASR through the bundled MLX helper
         case python   // Python server (fallback)
     }
@@ -22,7 +21,6 @@ class TranscriptionService: ObservableObject {
     private var serverProcess: Process?
     private let whisperService = WhisperService.shared
     private let voxtralService = VoxtralCppService()
-    private let gemmaService = GemmaCppService()
     private let vibeVoiceService = VibeVoiceService.shared
     private var statusCancellable: AnyCancellable?
     private var whisperCancellables = Set<AnyCancellable>()
@@ -49,14 +47,10 @@ class TranscriptionService: ObservableObject {
                 "[TranscriptionService] Restored VibeVoice backend; ready: \(isReady)"
             )
         } else if selectedBackend == .llm {
-            switch GlobalModelSettings.shared.selectedLLMEngine {
-            case .voxtral:
-                currentBackend = .native
-                isReady = voxtralService.isModelLoaded && voxtralService.isLlamaInstalled
-            case .gemma:
-                currentBackend = .gemma
-                isReady = gemmaService.isModelLoaded && gemmaService.isLlamaInstalled
-            }
+            // Gemma audio transcription is deferred. The legacy `.gemma` preference is migrated
+            // by GlobalModelSettings; only Voxtral may occupy the LLM transcription backend.
+            currentBackend = .native
+            isReady = voxtralService.isModelLoaded && voxtralService.isLlamaInstalled
             setupStatusBinding()
             logger.info(
                 "[TranscriptionService] Restored LLM backend; ready: \(isReady)"
@@ -72,31 +66,12 @@ class TranscriptionService: ObservableObject {
             isReady = true
             logger.info("[TranscriptionService] Using native Voxtral backend (Whisper not available)")
         } else if selectedBackend == .whisper && !whisperService.isReady {
-            // Try to ensure Whisper is ready
-            logger.info("[TranscriptionService] Whisper not ready, checking models...")
-            Task {
-                do {
-                    if !WhisperModelManager.shared.isModelLoaded {
-                        logger.info("[TranscriptionService] No Whisper models found, downloading default...")
-                        try await WhisperModelManager.shared.downloadModel(WhisperModelVariant.defaultVariant())
-                    }
-                    await MainActor.run {
-                        if self.whisperService.isReady {
-                            self.currentBackend = .whisper
-                            self.isReady = true
-                            self.setupStatusBinding()
-                            logger.info("[TranscriptionService] Whisper backend now ready")
-                        }
-                    }
-                } catch {
-                    logger.error("[TranscriptionService] Failed to initialize Whisper: \(error)")
-                    // Fall back to Python
-                    await MainActor.run {
-                        self.currentBackend = .python
-                        self.checkServerStatus()
-                    }
-                }
-            }
+            // Keep startup side-effect free. The setup wizard and Models screen explain the
+            // download size and let the user choose; an actual queued Whisper run may also request
+            // its explicitly selected model.
+            currentBackend = .whisper
+            isReady = false
+            transcriptionStatus = "No Whisper model installed — choose one in Models"
         }
         
         logger.info("[TranscriptionService] Initial backend: \(currentBackend), Ready: \(isReady)")
@@ -131,14 +106,6 @@ class TranscriptionService: ObservableObject {
             voxtralService.$transcriptionProgress
                 .assign(to: &$transcriptionProgress)
                 
-        case .gemma:
-            // Subscribe to status updates from GemmaService
-            gemmaService.$transcriptionStatus
-                .assign(to: &$transcriptionStatus)
-
-            gemmaService.$transcriptionProgress
-                .assign(to: &$transcriptionProgress)
-
         case .vibeVoice:
             vibeVoiceService.$transcriptionStatus
                 .assign(to: &$transcriptionStatus)
@@ -186,6 +153,16 @@ class TranscriptionService: ObservableObject {
     ) async throws -> String {
         logger.info("[TranscriptionService] Starting transcription for: \(audioFile)")
         logger.info("[TranscriptionService] Current backend: \(currentBackend)")
+
+        // Direct/menu-bar calls do not necessarily pass through TranscriptionQueueManager. Keep a
+        // final fail-closed admission check here so every backend is protected at the point where
+        // it is about to map model weights.
+        let resourceProfile = TranscriptionResourceProfile.forSelection(engineSelection)
+        if let deferral = SystemMemoryGate.shared.transcriptionDeferral(
+            profile: resourceProfile
+        ) {
+            throw TranscriptionError.resourcesUnavailable(deferral.reason)
+        }
         
         switch currentBackend {
         case .whisper:
@@ -203,15 +180,6 @@ class TranscriptionService: ObservableObject {
             // Use native llama.cpp with Voxtral
             logger.info("[TranscriptionService] Using native VoxtralCppService...")
             return try await voxtralService.transcribe(
-                audioFile: audioFile,
-                modelKey: engineSelection?.llmModelKey,
-                runSettings: runSettings
-            )
-
-        case .gemma:
-            // Use native llama.cpp with Gemma 4
-            logger.info("[TranscriptionService] Using native GemmaCppService...")
-            return try await gemmaService.transcribe(
                 audioFile: audioFile,
                 modelKey: engineSelection?.llmModelKey,
                 runSettings: runSettings
@@ -309,18 +277,6 @@ class TranscriptionService: ObservableObject {
         stopServer()
     }
 
-    func switchToGemma() async throws {
-        if !gemmaService.isModelLoaded {
-            try await gemmaService.downloadModel()
-        }
-        currentBackend = .gemma
-        isReady = true
-        setupStatusBinding()
-
-        // Stop Python server if running
-        stopServer()
-    }
-
     func switchToVibeVoice(
         quantization: VibeVoiceQuantization = GlobalModelSettings.shared.selectedVibeVoiceQuantization
     ) async throws {
@@ -351,10 +307,6 @@ class TranscriptionService: ObservableObject {
         
         if voxtralService.isModelLoaded {
             backends.append(.native)
-        }
-
-        if gemmaService.isModelLoaded {
-            backends.append(.gemma)
         }
 
         if vibeVoiceService.isRuntimeInstalled,

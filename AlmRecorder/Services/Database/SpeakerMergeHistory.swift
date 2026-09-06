@@ -163,7 +163,7 @@ class SpeakerMergeHistoryRepository {
     
     /// Delete merge history records (after successful unmerge)
     func deleteMergeHistory(historyId: Int64) throws {
-        try db.write { database in
+        _ = try db.write { database in
             try SpeakerMergeHistory.deleteOne(database, key: historyId)
         }
     }

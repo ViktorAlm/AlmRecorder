@@ -67,24 +67,7 @@ class WhisperService: ObservableObject {
             transcriptionStatus = "Whisper CLI not found - please reinstall"
         } else if !modelManager.isModelLoaded {
             logger.warning("[WhisperService] WARNING: No models downloaded yet")
-            transcriptionStatus = "No models available - downloading default model..."
-            
-            // Auto-download a default model if none exists
-            Task {
-                do {
-                    let defaultVariant = WhisperModelVariant.defaultVariant()
-                    try await modelManager.downloadModel(defaultVariant)
-                    await MainActor.run {
-                        self.checkStatus()
-                        self.transcriptionStatus = "Ready"
-                    }
-                } catch {
-                    logger.error("[WhisperService] Failed to download default model: \(error)")
-                    await MainActor.run {
-                        self.transcriptionStatus = "Failed to download model"
-                    }
-                }
-            }
+            transcriptionStatus = "No Whisper model installed — choose one in Models"
         } else {
             logger.info("[WhisperService] Ready with model: \(modelManager.currentModel)")
             transcriptionStatus = "Ready"
@@ -104,14 +87,16 @@ class WhisperService: ObservableObject {
         modelKey: String? = nil,
         variant: WhisperModelVariant? = nil,
         language: String? = nil,
-        speakerConfiguration: SpeakerPipelineConfiguration? = nil
+        speakerConfiguration: SpeakerPipelineConfiguration? = nil,
+        persistSpeakerIdentities: Bool = true
     ) async throws -> String {
         let result = try await transcribeWithResult(
             audioFile: audioFile,
             modelKey: modelKey,
             variant: variant,
             language: language,
-            speakerConfiguration: speakerConfiguration
+            speakerConfiguration: speakerConfiguration,
+            persistSpeakerIdentities: persistSpeakerIdentities
         )
         return result.fullTranscript
     }
@@ -123,7 +108,8 @@ class WhisperService: ObservableObject {
         variant: WhisperModelVariant? = nil,
         language: String? = nil,
         recordingId: Int? = nil,
-        speakerConfiguration: SpeakerPipelineConfiguration? = nil
+        speakerConfiguration: SpeakerPipelineConfiguration? = nil,
+        persistSpeakerIdentities: Bool = true
     ) async throws -> TranscriptionResult {
         
         // Log language parameter for debugging
@@ -134,9 +120,10 @@ class WhisperService: ObservableObject {
         }
         
         // Wait for semaphore to prevent concurrent transcriptions
+        let semaphore = transcriptionSemaphore
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
-                self.transcriptionSemaphore.wait()
+                semaphore.wait()
                 continuation.resume()
             }
         }
@@ -167,6 +154,7 @@ class WhisperService: ObservableObject {
         let physicalMemoryMB = Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024))
         
         logger.info("[WhisperService] Using selected model: \(selectedVariant.displayName)")
+        logger.info("[WhisperService] Model requires ~\(requiredRAM)MB system memory")
         logger.info("[WhisperService] Model requires ~\(requiredGPU)MB GPU memory")
         logger.info("[WhisperService] System has \(physicalMemoryMB)MB RAM")
         
@@ -178,7 +166,7 @@ class WhisperService: ObservableObject {
             try await modelManager.downloadModel(selectedVariant)
         }
         
-        guard let modelPath = modelManager.getModelPath(for: selectedVariant) else {
+        guard modelManager.getModelPath(for: selectedVariant) != nil else {
             throw TranscriptionError.modelNotFound
         }
         
@@ -213,6 +201,7 @@ class WhisperService: ObservableObject {
                 language: language,
                 recordingId: recordingId,
                 speakerConfiguration: speakerConfiguration,
+                persistSpeakerIdentities: persistSpeakerIdentities,
                 checkpoint: activeCheckpoint,
                 onChunkCompleted: onVADChunkCompleted
             )
@@ -384,8 +373,6 @@ class WhisperService: ObservableObject {
             
             // Try to transcribe chunk with retries
             var chunkTranscript: String? = nil
-            var lastError: Error?
-            
             for attempt in 0..<maxRetries {
                 do {
                     let effectiveLanguage = language ?? "auto"
@@ -402,7 +389,6 @@ class WhisperService: ObservableObject {
                     try? FileManager.default.removeItem(atPath: chunkWav)
                     break
                 } catch {
-                    lastError = error
                     if attempt < maxRetries - 1 {
                         logger.info("[WhisperService] Chunk \(index) failed (attempt \(attempt + 1)), retrying...")
                         try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
@@ -668,7 +654,8 @@ class WhisperService: ObservableObject {
         recordingId: Int?,
         checkpoint: TranscriptionCheckpoint?,
         onChunkCompleted: ((Int, [TranscriptionChunk], TimeInterval) async -> Void)?,
-        configuration: SpeakerPipelineConfiguration
+        configuration: SpeakerPipelineConfiguration,
+        persistSpeakerIdentities: Bool
     ) async throws -> TranscriptionResult {
         let sourceURL = URL(fileURLWithPath: audioFile).standardizedFileURL
         let totalDuration = audioConverter.getAudioDuration(filePath: audioFile) ?? 0
@@ -738,6 +725,7 @@ class WhisperService: ObservableObject {
         }
 
         var timedSegments: [WhisperTimedSegment] = []
+        var languageObservations: [WhisperLanguageObservation] = []
         var currentGlobalOffset: TimeInterval = 0
         let completed = checkpoint?.processedChunks ?? []
 
@@ -778,6 +766,15 @@ class WhisperService: ObservableObject {
                     enableDiarization: false,
                     wordTimestamps: true
                 )
+                if let detectedLanguage = detailed.detectedLanguage {
+                    languageObservations.append(
+                        WhisperLanguageObservation(
+                            code: detectedLanguage,
+                            confidence: detailed.detectedLanguageConfidence,
+                            duration: max(chunkDuration, 0.01)
+                        )
+                    )
+                }
                 let localSegments: [WhisperTimedSegment]
                 if detailed.timedSegments.isEmpty {
                     localSegments = SpeakerAlignment.approximateWordSegments(
@@ -868,7 +865,7 @@ class WhisperService: ObservableObject {
             )
         }
 
-        if !speakerEmbeddings.isEmpty {
+        if persistSpeakerIdentities, !speakerEmbeddings.isEmpty {
             let labelToUUID = speakerIdentificationService.resolveClusters(
                 SpeakerAlignment.identityClusters(
                     from: turns,
@@ -902,11 +899,17 @@ class WhisperService: ObservableObject {
             $0.speakerUUID.map { "uuid:\($0)" } ?? $0.speaker.map { "label:\($0)" }
         })
 
+        let languageResolution = WhisperLanguageResolver.resolve(
+            requestedLanguage: language,
+            observations: languageObservations
+        )
         return TranscriptionResult(
             fullTranscript: transcript,
             chunks: chunks,
             totalDuration: max(totalDuration, currentGlobalOffset),
-            language: language,
+            language: languageResolution?.code,
+            languageConfidence: languageResolution?.confidence,
+            languageDetectionSource: languageResolution?.source,
             usedVAD: true,
             detectedSpeakerCount: identities.count,
             speakerEmbeddings: speakerEmbeddings
@@ -919,6 +922,7 @@ class WhisperService: ObservableObject {
         language: String? = nil,
         recordingId: Int? = nil,
         speakerConfiguration: SpeakerPipelineConfiguration? = nil,
+        persistSpeakerIdentities: Bool = true,
         checkpoint: TranscriptionCheckpoint? = nil,
         onChunkCompleted: ((Int, [TranscriptionChunk], TimeInterval) async -> Void)? = nil
     ) async throws -> TranscriptionResult {
@@ -984,7 +988,8 @@ class WhisperService: ObservableObject {
                 recordingId: recordingId,
                 checkpoint: checkpoint,
                 onChunkCompleted: onChunkCompleted,
-                configuration: pipelineConfiguration
+                configuration: pipelineConfiguration,
+                persistSpeakerIdentities: persistSpeakerIdentities
             )
         }
         
@@ -1030,6 +1035,7 @@ class WhisperService: ObservableObject {
         
         // Step 3: Process each VAD chunk through diarization and transcription
         var allTranscriptionChunks: [TranscriptionChunk] = []
+        var languageObservations: [WhisperLanguageObservation] = []
         var currentGlobalOffset: TimeInterval = 0
         // Track unique speakers across all chunks BEFORE unification
         var allDiarizedSpeakers = Set<String>()
@@ -1074,14 +1080,7 @@ class WhisperService: ObservableObject {
             for vadIndex in checkpoint.processedChunks.sorted() {
                 if let saved = checkpoint.chunkTranscripts[vadIndex] {
                     for r in saved {
-                        allTranscriptionChunks.append(TranscriptionChunk(
-                            text: r.text,
-                            startTime: r.startTime,
-                            endTime: r.endTime,
-                            speaker: r.speaker,
-                            speakerUUID: r.speakerUUID,
-                            confidence: nil
-                        ))
+                        allTranscriptionChunks.append(r.transcriptionChunk)
                     }
                 }
                 if let offset = checkpoint.chunkOffsets[vadIndex] {
@@ -1258,6 +1257,15 @@ class WhisperService: ObservableObject {
                     )
                     segmentTranscript = detailed.text
                     segmentTokenStats = detailed.tokenStats
+                    if let detectedLanguage = detailed.detectedLanguage {
+                        languageObservations.append(
+                            WhisperLanguageObservation(
+                                code: detectedLanguage,
+                                confidence: detailed.detectedLanguageConfidence,
+                                duration: max(segment.endTime - segment.startTime, 0.01)
+                            )
+                        )
+                    }
                 } catch {
                     try? FileManager.default.removeItem(atPath: segmentWavPath)
                     try? FileManager.default.removeItem(at: segmentAudioURL)
@@ -1337,7 +1345,7 @@ class WhisperService: ObservableObject {
         }
 
         // Step 4: Unify speakers across chunks if embeddings are available
-        if !allChunkSpeakers.isEmpty && embeddingService != nil {
+        if !allChunkSpeakers.isEmpty, let embeddingService {
             await MainActor.run {
                 transcriptionStatus = "Unifying speaker identities..."
                 transcriptionProgress = 0.85  // 85% after all transcription
@@ -1346,7 +1354,7 @@ class WhisperService: ObservableObject {
             do {
                 // Use the same embedding service for unification
                 // DBSCAN will automatically find the optimal number of clusters
-                let unificationService = try SpeakerUnificationService(
+                let unificationService = SpeakerUnificationService(
                     embeddingService: embeddingService
                 )
                 let unificationResult = unificationService.unifySpeakers(from: allChunkSpeakers)
@@ -1363,22 +1371,25 @@ class WhisperService: ObservableObject {
                 
                 // "Merge Later" approach: create unnamed speakers for each unified cluster.
                 // No auto-matching against database. Users merge explicitly later.
-                let speakerRepo = GRDBSpeakerRepository()
                 var unifiedToUUID: [String: String] = [:]
-
-                for profile in unificationResult.speakerProfiles {
-                    let speakerUUID = UUID().uuidString
-                    let _ = try speakerRepo.create(
-                        uuid: speakerUUID,
-                        name: nil,
-                        embedding: profile.averageEmbedding,
-                        confidence: profile.confidence,
-                        sourceRecordingId: recordingId.map { Int64($0) }
-                    )
-                    unifiedToUUID[profile.globalId] = speakerUUID
+                if persistSpeakerIdentities {
+                    let speakerRepo = GRDBSpeakerRepository()
+                    for profile in unificationResult.speakerProfiles {
+                        let speakerUUID = UUID().uuidString
+                        let _ = try speakerRepo.create(
+                            uuid: speakerUUID,
+                            name: nil,
+                            embedding: profile.averageEmbedding,
+                            confidence: profile.confidence,
+                            sourceRecordingId: recordingId.map { Int64($0) }
+                        )
+                        unifiedToUUID[profile.globalId] = speakerUUID
+                    }
                 }
 
-                logger.info("[WhisperService] Created \(unifiedToUUID.count) unnamed speaker profiles for later merging")
+                if persistSpeakerIdentities {
+                    logger.info("[WhisperService] Created \(unifiedToUUID.count) unnamed speaker profiles for later merging")
+                }
 
                 // Update transcription chunks with unified speaker IDs and new UUIDs
                 for i in 0..<allTranscriptionChunks.count {
@@ -1425,22 +1436,26 @@ class WhisperService: ObservableObject {
                 logger.warning("[WhisperService] Speaker unification failed: \(error)")
                 // Fallback: create unnamed speaker records for each unique local speaker
                 // so embeddings are preserved in the database for later merging
-                let uniqueSpeakers = Dictionary(grouping: allChunkSpeakers, by: { $0.localSpeakerId })
                 var localIdToUUID: [String: String] = [:]
-
-                for (localId, segments) in uniqueSpeakers {
-                    if let bestSegment = segments.max(by: { $0.confidence < $1.confidence }) {
-                        do {
-                            let profile = try speakerIdentificationService.createSpeaker(
-                                embedding: bestSegment.embedding,
-                                name: nil,
-                                metadata: nil,
-                                recordingId: recordingId != nil ? Int(recordingId!) : nil
-                            )
-                            localIdToUUID[localId] = profile.uuid
-                            logger.info("[WhisperService] Created fallback speaker record for \(localId) → \(profile.uuid)")
-                        } catch {
-                            logger.warning("[WhisperService] Failed to create fallback speaker for \(localId): \(error)")
+                if persistSpeakerIdentities {
+                    let uniqueSpeakers = Dictionary(
+                        grouping: allChunkSpeakers,
+                        by: { $0.localSpeakerId }
+                    )
+                    for (localId, segments) in uniqueSpeakers {
+                        if let bestSegment = segments.max(by: { $0.confidence < $1.confidence }) {
+                            do {
+                                let profile = try speakerIdentificationService.createSpeaker(
+                                    embedding: bestSegment.embedding,
+                                    name: nil,
+                                    metadata: nil,
+                                    recordingId: recordingId
+                                )
+                                localIdToUUID[localId] = profile.uuid
+                                logger.info("[WhisperService] Created fallback speaker record for \(localId) → \(profile.uuid)")
+                            } catch {
+                                logger.warning("[WhisperService] Failed to create fallback speaker for \(localId): \(error)")
+                            }
                         }
                     }
                 }
@@ -1464,7 +1479,10 @@ class WhisperService: ObservableObject {
 
         // Handle case where diarization produced speakers but no embeddings were available
         // (Bug 3 fix: create placeholder speaker records so utterances can be linked)
-        if allChunkSpeakers.isEmpty && !allDiarizedSpeakers.isEmpty && !useFullFileDiarization {
+        if persistSpeakerIdentities,
+           allChunkSpeakers.isEmpty,
+           !allDiarizedSpeakers.isEmpty,
+           !useFullFileDiarization {
             let hasUnlinkedSpeakers = allTranscriptionChunks.contains { $0.speaker != nil && $0.speakerUUID == nil }
             if hasUnlinkedSpeakers {
                 logger.info("[WhisperService] No embeddings available, creating placeholder speakers for \(allDiarizedSpeakers.count) diarized speakers")
@@ -1518,7 +1536,7 @@ class WhisperService: ObservableObject {
             // Auto-unify: resolve this file's speaker clusters to stable cross-file UUIDs and stamp
             // speaker_uuid onto chunks, so utterances persist identity now (browseable + mergeable in
             // the wizard) instead of deferring everything. Same matcher the backfill uses.
-            if !fa.speakerEmbeddings.isEmpty {
+            if persistSpeakerIdentities, !fa.speakerEmbeddings.isEmpty {
                 let labelToUUID = speakerIdentificationService.resolveClusters(
                     fa.identityClusters,
                     recordingId: recordingId,
@@ -1588,11 +1606,17 @@ class WhisperService: ObservableObject {
             print("    - \(speaker): \(count) embeddings")
         }
         
-        var result = TranscriptionResult(
+        let languageResolution = WhisperLanguageResolver.resolve(
+            requestedLanguage: language,
+            observations: languageObservations
+        )
+        let result = TranscriptionResult(
             fullTranscript: fullTranscript,
             chunks: allTranscriptionChunks,
             totalDuration: currentGlobalOffset,
-            language: language,
+            language: languageResolution?.code,
+            languageConfidence: languageResolution?.confidence,
+            languageDetectionSource: languageResolution?.source,
             usedVAD: true,
             detectedSpeakerCount: finalSpeakerCount,  // Use the max of diarized or unified count
             speakerEmbeddings: speakerEmbeddings.isEmpty ? nil : speakerEmbeddings

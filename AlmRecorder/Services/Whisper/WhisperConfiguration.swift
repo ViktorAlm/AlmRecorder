@@ -71,7 +71,7 @@ enum WhisperConfiguration {
             size: "large",
             language: "sv",
             modelFile: "kb-whisper-large-q5_0.bin",
-            downloadURL: "https://huggingface.co/KBLab/kb-whisper-large/resolve/main/ggml-model-q5_0.bin",
+            downloadURL: "https://huggingface.co/KBLab/kb-whisper-large/resolve/d5d5984b4d8f7c4847a8ea203f1976285fb28300/ggml-model-q5_0.bin",
             fileSize: 1_073_741_824, // ~1GB
             description: "Best accuracy for Swedish, 47% better than OpenAI large-v3"
         ),
@@ -82,7 +82,7 @@ enum WhisperConfiguration {
             size: "medium",
             language: "sv",
             modelFile: "kb-whisper-medium-q5_0.bin",
-            downloadURL: "https://huggingface.co/KBLab/kb-whisper-medium/resolve/main/ggml-model-q5_0.bin",
+            downloadURL: "https://huggingface.co/KBLab/kb-whisper-medium/resolve/0abe10b9d7f75d0902656e5c06c5c4d549604dc5/ggml-model-q5_0.bin",
             fileSize: 536_870_912, // ~512MB
             description: "Balanced speed and accuracy for Swedish"
         ),
@@ -93,7 +93,7 @@ enum WhisperConfiguration {
             size: "small",
             language: "sv",
             modelFile: "kb-whisper-small-q5_0.bin",
-            downloadURL: "https://huggingface.co/KBLab/kb-whisper-small/resolve/main/ggml-model-q5_0.bin",
+            downloadURL: "https://huggingface.co/KBLab/kb-whisper-small/resolve/3564d61a42fc210ceaa55a22a96dd64478959c78/ggml-model-q5_0.bin",
             fileSize: 268_435_456, // ~256MB
             description: "Fast Swedish transcription, still beats OpenAI large-v3"
         ),
@@ -106,7 +106,7 @@ enum WhisperConfiguration {
             size: "large",
             language: nil,
             modelFile: "ggml-large-v3-q5_0.bin",
-            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
+            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-q5_0.bin",
             fileSize: 1_073_741_824, // ~1GB
             description: "Best multilingual accuracy, supports 99+ languages"
         ),
@@ -117,7 +117,7 @@ enum WhisperConfiguration {
             size: "medium",
             language: nil,
             modelFile: "ggml-medium-q5_0.bin",
-            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
+            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium-q5_0.bin",
             fileSize: 536_870_912, // ~512MB
             description: "Balanced multilingual transcription"
         ),
@@ -128,7 +128,7 @@ enum WhisperConfiguration {
             size: "base",
             language: nil,
             modelFile: "ggml-base-q5_0.bin",
-            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_0.bin",
+            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base-q5_0.bin",
             fileSize: 134_217_728, // ~128MB
             description: "Fast multilingual transcription"
         ),
@@ -139,7 +139,7 @@ enum WhisperConfiguration {
             size: "tiny",
             language: nil,
             modelFile: "ggml-tiny-q5_0.bin",
-            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_0.bin",
+            downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny-q5_0.bin",
             fileSize: 67_108_864, // ~64MB
             description: "Ultra-fast basic transcription"
         )
@@ -280,9 +280,13 @@ enum WhisperConfiguration {
                 args.append("-tdrz")
             }
             
-            // Enable word-level timestamps
+            // `-ml 1` enables whisper.cpp's experimental token timestamps, but on its own it
+            // wraps at tokenizer-token boundaries. Multilingual words can span several tokens
+            // (for example Swedish "spekulativa"), so omitting `-sow` visibly tears words apart.
+            // Keep whole lexical words while retaining the fine timing needed for speaker
+            // alignment. Full JSON output (`-ojf`) preserves the underlying token probabilities.
             if wordTimestamps {
-                args.append(contentsOf: ["-ml", "1"])
+                args.append(contentsOf: ["-ml", "1", "-sow"])
             } else {
                 args.append("--no-timestamps")
             }

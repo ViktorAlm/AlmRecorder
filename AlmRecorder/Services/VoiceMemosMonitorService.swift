@@ -382,8 +382,7 @@ class VoiceMemosMonitorService: ObservableObject {
                 audioFile: fileToProcess,
                 fileName: memo.fileName,
                 source: .voiceMemos,
-                priority: .high,  // Voice memos get high priority
-                timeout: 600      // 10 minutes timeout for voice memos
+                priority: .high  // Voice memos get high priority; queue memory waits are unbounded.
             )
             
             // Quick heuristic summary for the voice-memo list preview. The full LLM insights
@@ -528,7 +527,14 @@ class VoiceMemosMonitorService: ObservableObject {
             
             let audioFiles = contents.filter { url in
                 let ext = url.pathExtension.lowercased()
-                return ext == "m4a" || ext == "mp3" || ext == "wav"
+                // "qta" = QuickTime Audio, written by Voice Memos for iPhone 16 Pro+ "layered"
+                // (spatial) recordings — a multi-stream container (AAC + an APAC ambisonic
+                // stream). Without this, those recordings were silently invisible: never
+                // discovered, never queued, no error. VibeVoiceService already routes any
+                // extension outside {wav, m4a, mp3} through AVFoundation's convertToWAV, which
+                // — being Apple's own framework — reads the plain AAC track natively rather than
+                // needing ffmpeg to understand the unsupported APAC stream.
+                return ext == "m4a" || ext == "mp3" || ext == "wav" || ext == "qta"
             }
             
             logger.debug("[VoiceMemosMonitor] Found audio files | count=\(audioFiles.count)")
@@ -806,7 +812,7 @@ class VoiceMemosMonitorService: ObservableObject {
         
         // Also clear from database
         do {
-            try database.writeQueue { db in
+            _ = try database.writeQueue { db in
                 try VoiceMemoProcessed.deleteAll(db)
             }
         } catch {

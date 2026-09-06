@@ -3,8 +3,8 @@ import GRDB
 
 /// Orchestrates the transcript cleanup pass for one recording:
 /// re-score every visible utterance (text + token + cross-utterance + embedding signals) →
-/// auto-hide junk → group the verify tier into audio spans → ask Gemma what's actually said →
-/// apply verdicts through the tier rules → rebuild the stored transcript → stamp the recording.
+/// auto-hide hard-evidence junk → route uncertain lines to human review → rebuild the stored
+/// transcript → stamp the recording. Gemma audio verification is deferred.
 ///
 /// The tier rules (`apply`) are pure and unit-tested. Every failure path degrades to
 /// `pending_review` — the cleanup pass never destroys data and never applies a guess.
@@ -14,14 +14,9 @@ final class TranscriptCleanupService {
 
     private let utteranceRepo = GRDBUtteranceRepository()
     private let recordingRepo = GRDBRecordingRepository()
-    private let verifier = TranscriptVerificationService.shared
     private let logger = VoxtralLogger.shared
 
     private init() {}
-
-    /// Hard cap on Gemma listens per job — each one reloads the full model (~10–30s),
-    /// so this constant is the cost/coverage tuning knob.
-    static let maxSpansPerJob = 12
 
     /// Voice-print mismatch is implemented and unit-tested, but the live-library eval
     /// (2026-06-10) showed NO class separation on real data (confirmed-bad mean voiceMatch 0.813
@@ -102,7 +97,7 @@ final class TranscriptCleanupService {
                         statusHandler: ((String) -> Void)? = nil) async throws -> Outcome {
         var outcome = Outcome()
 
-        guard let recording = try recordingRepo.getById(recordingId) else {
+        guard try recordingRepo.getById(recordingId) != nil else {
             throw TranscriptionError.processFailed("Recording \(recordingId) not found")
         }
         let utterances = try utteranceRepo.getByRecording(id: recordingId, includeHidden: false)
@@ -141,11 +136,9 @@ final class TranscriptCleanupService {
 
         // 2. Hide junk; collect the verify tier.
         var toVerify: [Utterance] = []
-        var suspicionById: [Int64: Double] = [:]
         for (utterance, verdict) in zip(utterances, verdicts) {
             guard let id = utterance.id else { continue }
             if let status = utterance.reviewStatus, status.hasPrefix("user_") { continue }
-            suspicionById[id] = verdict.score
 
             switch verdict.tier {
             case .junk:
@@ -160,61 +153,18 @@ final class TranscriptCleanupService {
             }
         }
 
-        // 3. Verify against the audio (or park everything when the audio is gone).
+        // 3. Audio-model verification is deferred. Probabilistic findings are never auto-applied:
+        //    park them in the human review inbox with explicit provenance.
         if !toVerify.isEmpty {
-            let audioPath = recording.filePath
-            let audioExists = audioPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
-
-            if !audioExists {
-                for utterance in toVerify {
-                    guard let id = utterance.id else { continue }
-                    try utteranceRepo.setReviewStatus(utteranceId: id, status: .pendingReview,
-                                                      verifierResultJSON: #"{"error":"no_audio"}"#)
-                }
-                outcome.pendingReview += toVerify.count
-                outcome.skippedNoAudio += toVerify.count
-            } else if !verifier.isAvailable {
-                for utterance in toVerify {
-                    guard let id = utterance.id else { continue }
-                    try utteranceRepo.setReviewStatus(utteranceId: id, status: .pendingReview,
-                                                      verifierResultJSON: verifierUnavailableJSON())
-                }
-                outcome.pendingReview += toVerify.count
-            } else {
-                let allSpans = TranscriptVerificationService.buildSpans(toVerify)
-                // Highest-suspicion spans first; the rest go straight to the review inbox.
-                let ranked = allSpans.sorted { spanSuspicion($0, suspicionById) > spanSuspicion($1, suspicionById) }
-                let chosen = ranked.prefix(Self.maxSpansPerJob)
-                let overflow = ranked.dropFirst(Self.maxSpansPerJob)
-
-                for span in overflow {
-                    for line in span.lines {
-                        try utteranceRepo.setReviewStatus(utteranceId: line.utteranceId, status: .pendingReview)
-                        outcome.pendingReview += 1
-                    }
-                }
-                if !overflow.isEmpty {
-                    logger.info("[TranscriptCleanup] Span budget hit: \(overflow.count) span(s) sent to review unverified")
-                }
-
-                let utteranceById = Dictionary(uniqueKeysWithValues: toVerify.compactMap { u in u.id.map { ($0, u) } })
-                for (index, span) in chosen.enumerated() {
-                    try Task.checkCancellation()
-                    // The first span can prove the verifier structurally broken (projector won't
-                    // load) — every remaining span would repeat the same full-model-load failure.
-                    guard verifier.isAvailable else {
-                        for line in span.lines {
-                            try utteranceRepo.setReviewStatus(utteranceId: line.utteranceId, status: .pendingReview,
-                                                              verifierResultJSON: verifierUnavailableJSON())
-                            outcome.pendingReview += 1
-                        }
-                        continue
-                    }
-                    statusHandler?("Listening to span \(index + 1)/\(chosen.count)…")
-                    try await verifySpan(span, audioPath: audioPath!, language: recording.language,
-                                         utteranceById: utteranceById, outcome: &outcome)
-                }
+            for utterance in toVerify {
+                guard let id = utterance.id else { continue }
+                try utteranceRepo.setReviewStatus(
+                    utteranceId: id,
+                    status: .pendingReview,
+                    verifierResultJSON: verifierUnavailableJSON()
+                )
             }
+            outcome.pendingReview += toVerify.count
         }
 
         // 4. Make the stored transcript match the visible lines, stamp the recording.
@@ -227,6 +177,8 @@ final class TranscriptCleanupService {
 
     // MARK: - Private
 
+    #if false
+    // DEFERRED: historical Gemma audio-verification application path.
     private func verifySpan(_ span: TranscriptVerificationService.VerificationSpan,
                             audioPath: String, language: String?,
                             utteranceById: [Int64: Utterance],
@@ -237,6 +189,13 @@ final class TranscriptCleanupService {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            // A Metal OOM is a queue-level resource failure, not an ordinary bad verdict. Abort
+            // this recording immediately so the queue releases the GPU and observes its backoff
+            // before another full Gemma model load. Swallowing it here previously allowed all 12
+            // spans to OOM in seconds and stretched the global cooldown to its maximum.
+            if Self.shouldAbortVerification(after: error) {
+                throw error
+            }
             // Verification failure is never data loss — every line goes to the human.
             logger.warning("[TranscriptCleanup] Span verification failed: \(error.localizedDescription)")
             for line in span.lines {
@@ -272,6 +231,13 @@ final class TranscriptCleanupService {
             }
         }
     }
+    #endif
+
+    static func shouldAbortVerification(after error: Error) -> Bool {
+        guard let transcriptionError = error as? TranscriptionError else { return false }
+        if case .gpuOutOfMemory = transcriptionError { return true }
+        return false
+    }
 
     private func isEligibleForVerification(_ utterance: Utterance, force: Bool) -> Bool {
         Self.needsVerification(reviewStatus: utterance.reviewStatus,
@@ -300,11 +266,6 @@ final class TranscriptCleanupService {
         default:
             return true
         }
-    }
-
-    private func spanSuspicion(_ span: TranscriptVerificationService.VerificationSpan,
-                               _ suspicionById: [Int64: Double]) -> Double {
-        span.lines.map { suspicionById[$0.utteranceId] ?? 0 }.max() ?? 0
     }
 
     /// cosine(embedding[i], embedding[i-1]) per utterance, nil when either side has no
@@ -612,12 +573,9 @@ final class TranscriptCleanupService {
         return json
     }
 
-    /// Distinguishes "model not downloaded" from "runtime can't load the projector" in the stored
-    /// error so the review inbox can label the rows accurately.
+    /// Explicit provenance for suggestions intentionally routed to a human.
     private func verifierUnavailableJSON() -> String {
-        verifier.projectorFailureReason != nil
-            ? #"{"error":"projector_failed"}"#
-            : #"{"error":"verifier_unavailable"}"#
+        #"{"error":"audio_verification_deferred"}"#
     }
 
     private func verdictErrorJSON(_ error: Error) -> String {

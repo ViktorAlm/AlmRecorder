@@ -126,16 +126,42 @@ struct RunSettings: Codable, Equatable {
         }
         return copy
     }
+
+    /// Preserve the immutable job snapshot while changing only llama.cpp's layer offload. This is
+    /// used for the one-shot Voxtral CPU recovery path after a typed Metal OOM.
+    func withGpuLayers(_ gpuLayers: Int) -> RunSettings {
+        var copy = RunSettings(
+            temperature: temperature,
+            topK: topK,
+            topP: topP,
+            maxTokens: maxTokens,
+            contextKeep: contextKeep,
+            gpuLayers: gpuLayers,
+            seed: seed,
+            prompt: prompt
+        )
+        copy.engineSelection = engineSelection
+        copy.speakerProfile = speakerProfile
+        copy.speakerConfiguration = speakerConfiguration
+        copy.schedulingPolicy = schedulingPolicy
+        return copy
+    }
 }
 
 /// Checkpoint data for resuming interrupted jobs
 struct TranscriptionCheckpoint: Codable {
-    /// Indices of VAD chunks that have been fully processed
+    /// Backend that produced this checkpoint. A nil value is a legacy Whisper checkpoint from
+    /// before backend-tagged checkpoints existed.
+    var backend: TranscriptionBackend? = nil
+    /// Indices of VAD chunks or VibeVoice outer windows that have been fully processed.
     var processedChunks: [Int]
-    /// Per-chunk transcript results, keyed by VAD chunk index
+    /// Per-chunk transcript results, keyed by VAD chunk or VibeVoice window index.
     var chunkTranscripts: [Int: [ChunkResult]]
-    /// Global time offset after each chunk, keyed by VAD chunk index
+    /// Global time offset after each chunk/window, keyed by its index.
     var chunkOffsets: [Int: Double]
+    /// Smallest recovery depth known to be necessary for each VibeVoice outer window. Optional so
+    /// checkpoints written before adaptive VibeVoice recovery remain decodable.
+    var vibeVoiceRecoveryDepths: [Int: Int]? = nil
     /// When the checkpoint was last saved
     var lastProcessedTime: Date
 
@@ -146,6 +172,46 @@ struct TranscriptionCheckpoint: Codable {
         let endTime: Double
         let speaker: String?
         let speakerUUID: String?
+        let nativeSpeakerLabel: String?
+
+        init(
+            text: String,
+            startTime: Double,
+            endTime: Double,
+            speaker: String?,
+            speakerUUID: String?,
+            nativeSpeakerLabel: String? = nil
+        ) {
+            self.text = text
+            self.startTime = startTime
+            self.endTime = endTime
+            self.speaker = speaker
+            self.speakerUUID = speakerUUID
+            self.nativeSpeakerLabel = nativeSpeakerLabel
+        }
+
+        init(chunk: TranscriptionChunk) {
+            self.init(
+                text: chunk.text,
+                startTime: chunk.startTime,
+                endTime: chunk.endTime,
+                speaker: chunk.speaker,
+                speakerUUID: chunk.speakerUUID,
+                nativeSpeakerLabel: chunk.nativeSpeakerLabel
+            )
+        }
+
+        var transcriptionChunk: TranscriptionChunk {
+            TranscriptionChunk(
+                text: text,
+                startTime: startTime,
+                endTime: endTime,
+                speaker: speaker,
+                speakerUUID: speakerUUID,
+                nativeSpeakerLabel: nativeSpeakerLabel,
+                confidence: nil
+            )
+        }
     }
 
     static var empty: TranscriptionCheckpoint {
@@ -287,6 +353,27 @@ struct TranscriptionJob: Identifiable, Equatable {
     var canRetry: Bool {
         status == .failed && retryCount < maxRetries
     }
+
+    /// A pending job may be deliberately deferred rather than merely waiting its turn. Keep the
+    /// reason on the job so every queue surface can explain the state consistently.
+    var pendingReason: String? {
+        guard status == .pending else { return nil }
+        let reason = progressMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        return reason.isEmpty ? nil : reason
+    }
+
+    var isWaitingForSafeMemory: Bool {
+        pendingReason?.hasPrefix("Waiting for safe memory") == true
+    }
+
+    var pendingReasonDetail: String? {
+        guard let pendingReason else { return nil }
+        let prefix = "Waiting for safe memory · "
+        if pendingReason.hasPrefix(prefix) {
+            return String(pendingReason.dropFirst(prefix.count))
+        }
+        return pendingReason
+    }
     
     var processingTime: TimeInterval? {
         guard let start = startedAt else { return nil }
@@ -338,7 +425,7 @@ struct TranscriptionJob: Identifiable, Equatable {
     var detailedProgressMessage: String {
         switch progressPhase {
         case .waiting:
-            return "Waiting to start..."
+            return progressMessage.isEmpty ? "Waiting to start..." : progressMessage
         case .preparingAudio:
             return "Preparing audio file..."
         case .splittingChunks:

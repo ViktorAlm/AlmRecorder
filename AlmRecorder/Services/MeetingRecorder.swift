@@ -15,11 +15,12 @@ import OSLog
 ///
 /// Both are best-effort: if Screen Recording permission is missing we still record the mic, and vice
 /// versa. On stop, the two file URLs are handed to the transcription queue, tagged by source.
-final class MeetingRecorder: NSObject, ObservableObject {
+final class MeetingRecorder: NSObject, ObservableObject, @unchecked Sendable {
     /// Shared so a meeting keeps recording even if the user navigates away from the Record tab.
     static let shared = MeetingRecorder()
 
     @Published private(set) var isRecording = false
+    @Published private(set) var isStarting = false
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var micActive = false
     @Published private(set) var systemActive = false
@@ -33,7 +34,10 @@ final class MeetingRecorder: NSObject, ObservableObject {
     private let logger = Logger(subsystem: "com.almrecorder", category: "MeetingRecorder")
 
     // Mic
-    private let engine = AVAudioEngine()
+    // Keep no input audio unit alive while idle. In particular, voice-processing input nodes can
+    // continue to make macOS report microphone use after the engine has merely been stopped.
+    private var engine: AVAudioEngine?
+    private var micTapInstalled = false
     private var micFile: AVAudioFile?
 
     // System audio
@@ -47,26 +51,40 @@ final class MeetingRecorder: NSObject, ObservableObject {
     // MARK: - Lifecycle
 
     func start() async {
-        guard !isRecording else { return }
+        let shouldStart = await MainActor.run {
+            guard !isRecording, !isStarting else { return false }
+            isStarting = true
+            statusMessage = "Starting…"
+            return true
+        }
+        guard shouldStart else { return }
 
         let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let stamp = Int(Date().timeIntervalSince1970)
         micFileURL = base.appendingPathComponent("meeting_\(stamp)_mic.caf")
         systemFileURL = base.appendingPathComponent("meeting_\(stamp)_system.caf")
 
-        await MainActor.run { statusMessage = "Starting…" }
+        let startedMic = startMic()
+        let startedSystem = await startSystemAudio()
 
-        startMic()
-        await startSystemAudio()
-
-        guard micActive || systemActive else {
-            await MainActor.run { statusMessage = "No audio sources available." }
+        guard startedMic || startedSystem else {
+            stopMic()
+            await stopSystemAudio()
+            await MainActor.run {
+                isStarting = false
+                micActive = false
+                systemActive = false
+                statusMessage = "No audio sources available."
+            }
             return
         }
 
         await MainActor.run {
+            micActive = startedMic
+            systemActive = startedSystem
             startedAt = Date()
             duration = 0
+            isStarting = false
             isRecording = true
             statusMessage = sourceSummary()
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -79,7 +97,10 @@ final class MeetingRecorder: NSObject, ObservableObject {
     /// Stop both captures and return the recorded track URLs (nil if that source produced nothing).
     @discardableResult
     func stop() async -> (mic: URL?, system: URL?) {
-        guard isRecording else { return (nil, nil) }
+        guard isRecording || engine != nil || stream != nil else { return (nil, nil) }
+
+        let hadMic = engine != nil
+        let hadSystem = stream != nil
 
         await MainActor.run {
             timer?.invalidate()
@@ -90,29 +111,31 @@ final class MeetingRecorder: NSObject, ObservableObject {
         }
 
         // Mic
-        if micActive {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-        }
-        micFile = nil // closing the AVAudioFile flushes it
+        stopMic()
 
         // System
-        if let stream {
-            try? await stream.stopCapture()
-            self.stream = nil
-        }
-        systemQueue.sync { systemFile = nil }
+        await stopSystemAudio()
 
-        let mic = (micActive && fileHasAudio(micFileURL)) ? micFileURL : nil
-        let sys = (systemActive && fileHasAudio(systemFileURL)) ? systemFileURL : nil
-        await MainActor.run { statusMessage = "" }
+        let mic = (hadMic && fileHasAudio(micFileURL)) ? micFileURL : nil
+        let sys = (hadSystem && fileHasAudio(systemFileURL)) ? systemFileURL : nil
+        await MainActor.run {
+            micActive = false
+            systemActive = false
+            statusMessage = ""
+        }
         return (mic, sys)
     }
 
     // MARK: - Mic channel
 
-    private func startMic() {
+    @discardableResult
+    private func startMic() -> Bool {
+        // The engine owns the microphone input audio unit, so its lifetime is deliberately scoped
+        // to this recording attempt rather than the lifetime of the app-wide recorder singleton.
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
+        micTapInstalled = false
 
         // Enable Voice-Processing I/O for acoustic echo cancellation — without it the mic also records
         // the speaker output (the remote party leaks into our track, duplicating the system capture).
@@ -134,8 +157,8 @@ final class MeetingRecorder: NSObject, ObservableObject {
 
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, let url = micFileURL else {
-            setMicActive(false)
-            return
+            stopMic()
+            return false
         }
 
         do {
@@ -145,24 +168,49 @@ final class MeetingRecorder: NSObject, ObservableObject {
                 try? self?.micFile?.write(from: buffer)
                 self?.publishMicLevel(buffer)
             }
+            micTapInstalled = true
             try engine.start()
-            setMicActive(true)
             logger.info("Mic capture started @ \(format.sampleRate, format: .fixed(precision: 0))Hz")
+            return true
         } catch {
             logger.error("Mic capture failed: \(error.localizedDescription)")
-            setMicActive(false)
+            stopMic()
+            return false
         }
+    }
+
+    /// Stop and release every object that owns a microphone input audio unit. Releasing the engine
+    /// (not just calling `stop`) is what makes idle microphone use unambiguous to macOS.
+    private func stopMic() {
+        guard let engine else {
+            micFile = nil
+            return
+        }
+
+        let input = engine.inputNode
+        if micTapInstalled {
+            input.removeTap(onBus: 0)
+            micTapInstalled = false
+        }
+        engine.stop()
+        if #available(macOS 14.0, *) {
+            try? input.setVoiceProcessingEnabled(false)
+        }
+        engine.reset()
+        micFile = nil // closing the AVAudioFile flushes it
+        self.engine = nil
     }
 
     // MARK: - System-audio channel (ScreenCaptureKit)
 
-    private func startSystemAudio() async {
+    @discardableResult
+    private func startSystemAudio() async -> Bool {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: false)
             guard let display = content.displays.first else {
                 logger.warning("No display available for system audio capture")
-                return
+                return false
             }
 
             let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
@@ -180,20 +228,31 @@ final class MeetingRecorder: NSObject, ObservableObject {
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemQueue)
             try await stream.startCapture()
             self.stream = stream
-            setSystemActive(true)
+            await MainActor.run {
+                PermissionsManager.shared.noteScreenRecordingAccessGranted()
+            }
             logger.info("System-audio capture started")
+            return true
         } catch {
             logger.error("System-audio capture failed: \(error.localizedDescription)")
-            setSystemActive(false)
+            await stopSystemAudio()
             await MainActor.run {
                 statusMessage = "System audio off — enable Screen Recording in System Settings ▸ Privacy."
             }
+            return false
         }
+    }
+
+    private func stopSystemAudio() async {
+        if let stream {
+            try? await stream.stopCapture()
+            self.stream = nil
+        }
+        systemQueue.sync { systemFile = nil }
     }
 
     // MARK: - Helpers
 
-    private func setMicActive(_ v: Bool) { DispatchQueue.main.async { self.micActive = v } }
     private func setSystemActive(_ v: Bool) { DispatchQueue.main.async { self.systemActive = v } }
 
     private func publishMicLevel(_ buffer: AVAudioPCMBuffer) {

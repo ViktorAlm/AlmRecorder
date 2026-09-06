@@ -63,7 +63,7 @@ struct PeopleView: View {
             }
         }
         .task { await reload() }
-        .onChange(of: showManage) { presenting in
+        .onChange(of: showManage) { _, presenting in
             if !presenting { Task { await reload() } }
         }
         .sheet(isPresented: $showManage) {
@@ -81,7 +81,7 @@ struct PeopleView: View {
             }
             .frame(minWidth: 800, minHeight: 580)
         }
-        .onChange(of: showSuggested) { presenting in
+        .onChange(of: showSuggested) { _, presenting in
             if !presenting { Task { await reload() } }
         }
         .sheet(isPresented: $showSuggested) {

@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct ModernContentView: View {
-    @State private var selection: NavigationItem? = .dashboard
+    // The everyday loop is browse → record → find, so returning users land on their recordings
+    // instead of an analytics-oriented dashboard.
+    @State private var selection: NavigationItem? = .library
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @StateObject private var voiceMemosImporter = VoiceMemosImporter()
     @StateObject private var appState = AppState.shared
@@ -65,15 +67,33 @@ struct ModernContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .frame(minWidth: 1100, minHeight: 680)
         // First-run setup wizard (system check → model downloads → connect Voice Memos).
+        // A sheet dismissal is never setup completion: only an explicit destination button on the
+        // final step may persist `hasCompletedSetup`.
         .sheet(isPresented: Binding(
             get: { !hasCompletedSetup },
-            set: { presenting in if !presenting { hasCompletedSetup = true } }
+            set: { _ in }
         )) {
-            SetupWizardView { hasCompletedSetup = true }
+            SetupWizardView { destination in
+                selection = destination
+                hasCompletedSetup = true
+                if destination == .record && !MeetingRecorder.shared.isRecording {
+                    Task { await MeetingRecorder.shared.start() }
+                }
+            }
+            .interactiveDismissDisabled()
         }
         // Provide focused values for menu commands
         .focusedValue(\.navigationSelection, $selection)
         .focusedValue(\.voiceMemosImporter, voiceMemosImporter)
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("NavigateToSearch"))) { _ in
+            selection = .search
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("NavigateToVoiceMemos"))) { _ in
+            selection = .voiceMemos
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("NavigateToQueue"))) { _ in
+            selection = .queue
+        }
     }
     
     /// The sidebar List only contains `NavigationItem.sidebarItems`. Handing it a non-member
@@ -104,7 +124,7 @@ struct ModernContentView: View {
         case .import:
             ImportView()  // Using original ImportView until ModernImportView is fully implemented
         case .library:
-            ModernLibraryView()
+            LibraryView(selection: $selection)
         case .history:
             HistoryView()
         case .search:

@@ -1,8 +1,7 @@
 import Foundation
 import Combine
 
-/// Manages Gemma model downloads and on-disk status. Mirrors VoxtralModelManager but against the
-/// Gemma catalog/directory. Each model is a (GGUF + BF16 mmproj) pair downloaded via UnifiedDownloadQueue.
+/// Manages Gemma GGUF downloads and the projector required by audio-grounded consensus.
 class GemmaModelManager: ObservableObject {
 
     // MARK: - Published Properties
@@ -27,23 +26,21 @@ class GemmaModelManager: ObservableObject {
 
     // MARK: - Public Methods
 
-    /// Check if a specific model is downloaded (both the GGUF and its mmproj, with sane sizes).
+    /// Check if a specific text model GGUF is downloaded with a sane size.
     func isModelDownloaded(_ modelKey: String) -> Bool {
         guard let config = GemmaConfiguration.models[modelKey] else { return false }
 
         let modelPath = modelsDirectory.appendingPathComponent(config.modelFile)
-        let mmprojPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
-
-        guard FileManager.default.fileExists(atPath: modelPath.path),
-              FileManager.default.fileExists(atPath: mmprojPath.path) else {
+        guard FileManager.default.fileExists(atPath: modelPath.path) else {
             return false
         }
 
         if let modelAttrs = try? FileManager.default.attributesOfItem(atPath: modelPath.path),
-           let modelSize = modelAttrs[.size] as? Int64,
-           let mmprojAttrs = try? FileManager.default.attributesOfItem(atPath: mmprojPath.path),
-           let mmprojSize = mmprojAttrs[.size] as? Int64 {
-            return modelSize > 100_000_000 && mmprojSize > 10_000_000
+           let modelSize = modelAttrs[.size] as? Int64 {
+            return UnifiedDownloadQueue.isAcceptableFileSize(
+                modelSize,
+                declaredSize: Int64(config.sizeGB * 1_000_000_000)
+            )
         }
         return false
     }
@@ -59,18 +56,25 @@ class GemmaModelManager: ObservableObject {
         return modelPath
     }
 
-    /// Path to a mmproj file (only if it exists on disk).
     func getMmprojPath(for modelKey: String) -> URL? {
         guard let config = GemmaConfiguration.models[modelKey] else { return nil }
-        let mmprojPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
-        guard FileManager.default.fileExists(atPath: mmprojPath.path) else {
-            logger.warning("[Gemma] Mmproj file not found at path: \(mmprojPath.path)")
+        let path = modelsDirectory.appendingPathComponent(config.mmprojFile)
+        guard FileManager.default.fileExists(atPath: path.path),
+              let values = try? path.resourceValues(forKeys: [.fileSizeKey]),
+              let size = values.fileSize else {
             return nil
         }
-        return mmprojPath
+        return UnifiedDownloadQueue.isAcceptableFileSize(
+            Int64(size),
+            declaredSize: Int64(config.mmprojSizeGB * 1_000_000_000)
+        ) ? path : nil
     }
 
-    /// Download a model (GGUF + BF16 mmproj) via the shared download queue.
+    func isAudioModelDownloaded(_ modelKey: String) -> Bool {
+        isModelDownloaded(modelKey) && getMmprojPath(for: modelKey) != nil
+    }
+
+    /// Download a GGUF via the shared queue. Audio-consensus models include their projector.
     func downloadModel(_ modelKey: String) async throws {
         guard let config = GemmaConfiguration.models[modelKey] else {
             logger.error("[Gemma] Model configuration not found for: \(modelKey)")
@@ -79,7 +83,9 @@ class GemmaModelManager: ObservableObject {
 
         logger.info("[Gemma] Starting download for model: \(config.name)")
 
-        if isModelDownloaded(modelKey) {
+        let needsAudioProjector = GemmaConfiguration.isAudioConsensusModel(modelKey)
+        if isModelDownloaded(modelKey),
+           !needsAudioProjector || isAudioModelDownloaded(modelKey) {
             logger.info("[Gemma] Model already downloaded: \(config.name)")
             await MainActor.run {
                 isModelLoaded = true
@@ -89,9 +95,50 @@ class GemmaModelManager: ObservableObject {
         }
 
         let modelPath = modelsDirectory.appendingPathComponent(config.modelFile)
-        let mmprojPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
-        let additionalFiles = [(url: URL(string: config.mmprojURL)!, path: mmprojPath)]
+        let projectorPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
 
+        // The main GGUF may predate audio consensus. Queue just the missing projector rather than
+        // making the shared downloader short-circuit on the already-present model file.
+        if isModelDownloaded(modelKey),
+           needsAudioProjector,
+           getMmprojPath(for: modelKey) == nil,
+           let projectorURL = URL(string: config.mmprojURL) {
+            let projectorID = "gemma-\(modelKey)-additional"
+            UnifiedDownloadQueue.shared.enqueueDownload(
+                modelId: projectorID,
+                displayName: "\(config.name) audio projector",
+                modelType: "gemma",
+                downloadURL: projectorURL,
+                destinationPath: projectorPath,
+                fileSize: Int64(config.mmprojSizeGB * 1_000_000_000)
+            )
+            guard await waitForDownload(projectorID) else {
+                throw TranscriptionError.downloadFailed
+            }
+            guard isAudioModelDownloaded(modelKey) else {
+                throw TranscriptionError.downloadFailed
+            }
+            await MainActor.run {
+                isModelLoaded = true
+                currentModel = modelKey
+                downloadProgress = 1
+            }
+            return
+        }
+
+        let projectorFiles: [UnifiedDownloadQueue.AdditionalDownload]
+        if needsAudioProjector,
+           let projectorURL = URL(string: config.mmprojURL) {
+            projectorFiles = [
+                UnifiedDownloadQueue.AdditionalDownload(
+                    url: projectorURL,
+                    path: projectorPath,
+                    fileSize: Int64(config.mmprojSizeGB * 1_000_000_000)
+                )
+            ]
+        } else {
+            projectorFiles = []
+        }
         UnifiedDownloadQueue.shared.enqueueDownload(
             modelId: "gemma-\(modelKey)",
             displayName: config.name,
@@ -99,7 +146,7 @@ class GemmaModelManager: ObservableObject {
             downloadURL: URL(string: config.modelURL)!,
             destinationPath: modelPath,
             fileSize: Int64(config.sizeGB * 1_000_000_000),
-            additionalFiles: additionalFiles
+            additionalFiles: projectorFiles
         )
 
         logger.info("[Gemma] Enqueued download: \(config.name)")
@@ -108,9 +155,18 @@ class GemmaModelManager: ObservableObject {
             isDownloading = UnifiedDownloadQueue.shared.isInQueue("gemma-\(modelKey)")
         }
 
-        await waitForDownload("gemma-\(modelKey)")
+        guard await waitForDownload("gemma-\(modelKey)") else {
+            throw TranscriptionError.downloadFailed
+        }
 
-        if isModelDownloaded(modelKey) {
+        if needsAudioProjector {
+            guard await waitForDownload("gemma-\(modelKey)-additional") else {
+                throw TranscriptionError.downloadFailed
+            }
+        }
+        if isModelDownloaded(modelKey),
+           !needsAudioProjector
+                || isAudioModelDownloaded(modelKey) {
             await MainActor.run {
                 isModelLoaded = true
                 currentModel = modelKey
@@ -122,7 +178,8 @@ class GemmaModelManager: ObservableObject {
         }
     }
 
-    /// Delete a downloaded model. The shared mmproj is only removed when no sibling quant needs it.
+    /// Delete a downloaded text model. Existing legacy projector files are left untouched and are
+    /// never loaded; removing unrelated historical files is outside this model operation.
     func deleteModel(_ modelKey: String) throws {
         guard let config = GemmaConfiguration.models[modelKey] else {
             throw TranscriptionError.modelNotFound
@@ -133,17 +190,6 @@ class GemmaModelManager: ObservableObject {
             try FileManager.default.removeItem(at: modelPath)
         }
 
-        // Only delete the mmproj if no other downloaded model in the same family still references it.
-        let mmprojStillNeeded = GemmaConfiguration.models.contains { key, other in
-            key != modelKey && other.mmprojFile == config.mmprojFile && isModelDownloaded(key)
-        }
-        if !mmprojStillNeeded {
-            let mmprojPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
-            if FileManager.default.fileExists(atPath: mmprojPath.path) {
-                try FileManager.default.removeItem(at: mmprojPath)
-            }
-        }
-
         if currentModel == modelKey {
             currentModel = ""
             isModelLoaded = false
@@ -152,23 +198,16 @@ class GemmaModelManager: ObservableObject {
         logger.info("[Gemma] Deleted model: \(config.name)")
     }
 
-    /// Total on-disk size (GGUF + mmproj) in bytes.
+    /// Text model GGUF size in bytes.
     func getModelSize(_ modelKey: String) -> Int64 {
         guard let config = GemmaConfiguration.models[modelKey] else { return 0 }
 
         let modelPath = modelsDirectory.appendingPathComponent(config.modelFile)
-        let mmprojPath = modelsDirectory.appendingPathComponent(config.mmprojFile)
-
-        var totalSize: Int64 = 0
         if let attributes = try? FileManager.default.attributesOfItem(atPath: modelPath.path),
            let size = attributes[.size] as? Int64 {
-            totalSize += size
+            return size
         }
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: mmprojPath.path),
-           let size = attributes[.size] as? Int64 {
-            totalSize += size
-        }
-        return totalSize
+        return 0
     }
 
     // MARK: - Private Methods
@@ -202,8 +241,8 @@ class GemmaModelManager: ObservableObject {
     }
 
     /// Wait for a model to finish downloading.
-    private func waitForDownload(_ modelId: String) async {
-        let maxWaitTime: TimeInterval = 3600 // 1 hour
+    private func waitForDownload(_ modelId: String) async -> Bool {
+        let maxWaitTime: TimeInterval = 8 * 60 * 60
         let checkInterval: TimeInterval = 1.0
         let startTime = Date()
 
@@ -215,14 +254,17 @@ class GemmaModelManager: ObservableObject {
                             isDownloading = false
                             downloadProgress = 1.0
                         }
-                        return
+                        return true
                     } else if task.state == .failed {
                         await MainActor.run {
                             isDownloading = false
                             downloadProgress = 0.0
                         }
-                        return
+                        return false
                     }
+                } else if Date().timeIntervalSince(startTime) >= 5 {
+                    logger.error("[Gemma] Download task was never created: \(modelId)")
+                    return false
                 }
             }
 
@@ -232,7 +274,13 @@ class GemmaModelManager: ObservableObject {
                 }
             }
 
-            try? await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(checkInterval * 1_000_000_000))
+            } catch {
+                return false
+            }
         }
+        logger.error("[Gemma] Download timed out: \(modelId)")
+        return false
     }
 }

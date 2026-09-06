@@ -6,8 +6,40 @@ import Foundation
 let almRecorderExcludes = [
     "Info.plist",
     "AlmRecorder.entitlements",
-    "Resources/AppIcon.icns"
+    "Resources/AppIcon.icns",
+    // Historical synthetic Core ML smoke-test asset. Production speaker embeddings come from
+    // FluidAudio's downloaded, versioned models; never put the random test network in the app.
+    "Resources/Models"
 ] + (FileManager.default.fileExists(atPath: "AlmRecorder/Tests") ? ["Tests"] : [])
+
+// Real evaluation fixtures can contain transcripts, filenames, speaker identities, and audio.
+// Every developer supplies their own ignored `Tests/AlmRecorderTests` tree; SwiftPM discovers and
+// runs it when present, while public/clean checkouts remain buildable without private data.
+let developerPrivateTestTargets: [Target] =
+    (FileManager.default.fileExists(atPath: "Tests/AlmRecorderTests")
+    ? [
+        .testTarget(
+            name: "AlmRecorderTests",
+            dependencies: [
+                "AlmRecorder",
+                "AlmRecorderMCPProtocol",
+                "AlmRecorderEvaluationKit",
+                .product(name: "GRDB", package: "GRDBCustom"),
+                .product(name: "FluidAudio", package: "FluidAudio")
+            ],
+            path: "Tests/AlmRecorderTests"
+        )
+    ]
+    : [])
+    + (FileManager.default.fileExists(atPath: "Tests/AlmRecorderMemorySafetyTests")
+    ? [
+        .testTarget(
+            name: "AlmRecorderMemorySafetyTests",
+            dependencies: ["AlmRecorder"],
+            path: "Tests/AlmRecorderMemorySafetyTests"
+        )
+    ]
+    : [])
 
 let package = Package(
     name: "AlmRecorder",
@@ -70,9 +102,39 @@ let package = Package(
                 .process("Assets.xcassets"),
                 .copy("Resources/Libraries"),
                 .copy("Resources/Binaries"),
-                .copy("Resources/Models"),
-                .copy("Resources/Python")
+                .copy("Resources/Python"),
+                .copy("Resources/Licenses"),
+                .copy("PrivacyInfo.xcprivacy")
             ]
+        ),
+        .testTarget(
+            name: "AlmRecorderSpeakerSafetyTests",
+            dependencies: [
+                "AlmRecorder",
+                .product(name: "GRDB", package: "GRDBCustom")
+            ],
+            path: "DeveloperTests/AlmRecorderSpeakerSafetyTests"
+        ),
+        .testTarget(
+            name: "AlmRecorderQualitySafetyTests",
+            dependencies: ["AlmRecorder"],
+            path: "DeveloperTests/AlmRecorderQualitySafetyTests"
+        ),
+        .testTarget(
+            name: "AlmRecorderSearchTests",
+            dependencies: [
+                "AlmRecorder",
+                .product(name: "GRDB", package: "GRDBCustom")
+            ],
+            path: "DeveloperTests/AlmRecorderSearchTests"
+        ),
+        .testTarget(
+            name: "AlmRecorderMCPPrivacyTests",
+            dependencies: [
+                "AlmRecorder",
+                .product(name: "GRDB", package: "GRDBCustom")
+            ],
+            path: "DeveloperTests/AlmRecorderMCPPrivacyTests"
         )
-    ]
+    ] + developerPrivateTestTargets
 )

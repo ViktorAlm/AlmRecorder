@@ -1,11 +1,15 @@
 import Foundation
 
 /// Handles execution of llama-mtmd-cli process
-class LlamaCppProcessRunner {
+final class LlamaCppProcessRunner: @unchecked Sendable {
     
     private let logger = VoxtralLogger.shared
     private let outputParser = LlamaCppOutputParser()
-    private var currentProcess: Process?
+    private let currentProcessState = LockedValue<Process?>(nil)
+    private var currentProcess: Process? {
+        get { currentProcessState.snapshot }
+        set { currentProcessState.withValue { $0 = newValue } }
+    }
     
     /// Path to llama-mtmd-cli executable
     private(set) var llamaMtmdPath: String
@@ -197,21 +201,28 @@ class LlamaCppProcessRunner {
         }
         
         // Prepare to capture output
-        var outputData = Data()
-        var errorData = Data()
-        var lastProgressTime = Date()
+        let outputBuffer = LockedValue(Data())
+        let errorBuffer = LockedValue(Data())
+        let lastProgressTime = LockedValue(Date())
         let maxOutputSize = 1_048_576 // 1MB max output size
-        var outputExceeded = false
+        let outputExceeded = LockedValue(false)
         
         // Set up handlers to read output as it comes
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            outputData.append(data)
+            let outputSize = outputBuffer.withValue { buffer -> Int in
+                buffer.append(data)
+                return buffer.count
+            }
             
             // Check for excessive output
-            if outputData.count > maxOutputSize && !outputExceeded {
-                outputExceeded = true
-                self.logger.error("Output size exceeded 1MB (\(outputData.count) bytes) - possible runaway generation")
+            let firstOverflow = outputExceeded.withValue { exceeded -> Bool in
+                guard outputSize > maxOutputSize, !exceeded else { return false }
+                exceeded = true
+                return true
+            }
+            if firstOverflow {
+                self.logger.error("Output size exceeded 1MB (\(outputSize) bytes) - possible runaway generation")
                 // Don't terminate immediately, let timeout handle it
             }
             
@@ -246,14 +257,14 @@ class LlamaCppProcessRunner {
                             progressHandler?(line)
                         }
                     }
-                    lastProgressTime = Date()
+                    lastProgressTime.withValue { $0 = Date() }
                 }
             }
         }
         
         errorPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            errorData.append(data)
+            errorBuffer.withValue { $0.append(data) }
             
             // Log error messages immediately
             if let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty {
@@ -273,8 +284,6 @@ class LlamaCppProcessRunner {
 
             // Wait for completion with timeout
             let startTime = Date()
-            var isCompleted = false
-            
             while process.isRunning {
                 // Check timeout
                 if Date().timeIntervalSince(startTime) > timeout {
@@ -289,17 +298,17 @@ class LlamaCppProcessRunner {
                 }
                 
                 // Check if we're stuck (no progress for 30 seconds)
-                if Date().timeIntervalSince(lastProgressTime) > 30 {
+                if Date().timeIntervalSince(lastProgressTime.snapshot) > 30 {
                     let elapsedTime = Int(Date().timeIntervalSince(startTime))
                     let minutes = elapsedTime / 60
                     let seconds = elapsedTime % 60
                     logger.warning("[ProcessRunner] No progress for 30s - elapsed: \(minutes)m \(seconds)s")
                     progressHandler?("Processing... (\(minutes)m \(seconds)s elapsed) - this may take a while for long audio files")
-                    lastProgressTime = Date()
+                    lastProgressTime.withValue { $0 = Date() }
                     
                     // Log current output/error state
-                    logger.debug("[ProcessRunner] Current output size: \(outputData.count) bytes")
-                    logger.debug("[ProcessRunner] Current error size: \(errorData.count) bytes")
+                    logger.debug("[ProcessRunner] Current output size: \(outputBuffer.snapshot.count) bytes")
+                    logger.debug("[ProcessRunner] Current error size: \(errorBuffer.snapshot.count) bytes")
                 }
                 
                 // Small delay to prevent busy waiting. Cancellation-safe: if a higher-priority GPU
@@ -320,14 +329,20 @@ class LlamaCppProcessRunner {
             errorPipe.fileHandleForReading.readabilityHandler = nil
             
             // Read any remaining data
-            outputData.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
-            errorData.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            outputBuffer.withValue {
+                $0.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
+            }
+            errorBuffer.withValue {
+                $0.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            }
             
             let terminationStatus = process.terminationStatus
             logger.debug("Process exited with status: \(terminationStatus)")
             
             // Warn about excessive output
-            if outputExceeded {
+            var outputData = outputBuffer.snapshot
+            let errorData = errorBuffer.snapshot
+            if outputExceeded.snapshot {
                 logger.warning("Final output size: \(outputData.count) bytes - truncating to prevent memory issues")
                 // Truncate to reasonable size for processing
                 if outputData.count > maxOutputSize {
@@ -456,56 +471,11 @@ class LlamaCppProcessRunner {
         }
     }
     
-    /// Install llama.cpp using Homebrew
+    /// The release contains a tested llama.cpp build and its matching libraries. Installing a
+    /// moving Homebrew build cannot safely repair one missing executable because its ABI may not
+    /// match the bundled dylibs.
     func installLlamaCpp() async throws {
-        logger.info("Attempting to install llama.cpp via Homebrew")
-        
-        // Check for Homebrew
-        let brewPaths = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
-        var brewPath: String?
-        
-        for path in brewPaths {
-            if FileManager.default.fileExists(atPath: path) {
-                brewPath = path
-                break
-            }
-        }
-        
-        guard let brew = brewPath else {
-            logger.error("Homebrew not found")
-            throw TranscriptionError.homebrewNotFound
-        }
-        
-        // Install llama.cpp
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: brew)
-        process.arguments = ["install", "llama.cpp"]
-        
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        
-        do {
-            logger.info("Running: \(brew) install llama.cpp")
-            try process.run()
-            process.waitUntilExit()
-            
-            if process.terminationStatus != 0 {
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorString = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-                logger.error("Installation failed: \(errorString)")
-                throw TranscriptionError.installationFailed
-            }
-            
-            logger.info("Successfully installed llama.cpp")
-            
-            // Update path
-            self.llamaMtmdPath = Self.findLlamaMtmdCli()
-            
-        } catch {
-            logger.error("Failed to install llama.cpp: \(error.localizedDescription)")
-            throw TranscriptionError.installationFailed
-        }
+        logger.error("Bundled llama.cpp runtime is missing or incomplete; reinstall AlmRecorder")
+        throw TranscriptionError.llamaCppNotFound
     }
 }

@@ -1,6 +1,40 @@
 import Foundation
 import SwiftUI
 
+/// Exact ASR configuration that produced the currently committed transcript. Older recordings
+/// legitimately have nil provenance; callers must display that as unknown instead of guessing.
+struct RecordingTranscriptionProvenance: Codable, Equatable {
+    static let pipelineVersion = 2
+
+    let pipelineVersion: Int
+    let engineSelection: TranscriptionEngineSelection
+    let runSettings: RunSettings
+    let completedAt: Date
+    /// Resolved BCP-47/Whisper language code stored on the recording.
+    let detectedLanguage: String?
+    /// `whisper_audio`, `user_selected`, `transcript_fallback`, or nil for legacy runs.
+    let languageDetectionSource: String?
+    /// Whisper audio-language probability when auto detection was used.
+    let languageDetectionConfidence: Float?
+
+    init(
+        engineSelection: TranscriptionEngineSelection,
+        runSettings: RunSettings,
+        completedAt: Date = Date(),
+        detectedLanguage: String? = nil,
+        languageDetectionSource: String? = nil,
+        languageDetectionConfidence: Float? = nil
+    ) {
+        self.pipelineVersion = Self.pipelineVersion
+        self.engineSelection = engineSelection
+        self.runSettings = runSettings
+        self.completedAt = completedAt
+        self.detectedLanguage = detectedLanguage
+        self.languageDetectionSource = languageDetectionSource
+        self.languageDetectionConfidence = languageDetectionConfidence
+    }
+}
+
 /// Represents a complete recording/transcription session
 struct Recording: Codable, Identifiable {
     let id: Int64?
@@ -26,6 +60,13 @@ struct Recording: Codable, Identifiable {
     // MCP clients never need to retain the database's internal integer primary key.
     var externalId: String? = nil
     var updatedAt: Date? = nil
+
+    // Local-only MCP privacy control (migration v41). Blocking tags can still
+    // make the effective access false when this explicit switch is true.
+    var mcpAccessEnabled: Bool = true
+
+    // Exact foreground ASR provenance (migration v42). Nil is honest legacy provenance.
+    var transcriptionProvenance: RecordingTranscriptionProvenance? = nil
     
     enum RecordingSource: String, Codable, CaseIterable {
         case recording = "recording"

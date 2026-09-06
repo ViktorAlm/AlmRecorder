@@ -16,72 +16,21 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $selection) {
-                Section {
-                    ForEach(NavigationItem.sidebarItems, id: \.self) { item in
-                        if item == .queue {
-                            NavigationLink(value: item) {
-                                HStack {
-                                    Label {
-                                        Text(item.rawValue)
-                                            .font(.system(.body, design: .rounded))
-                                    } icon: {
-                                        Image(systemName: item.icon)
-                                            .font(.title3)
-                                            .foregroundStyle(item.color)
-                                    }
+                Section("Record & Find") {
+                    ForEach(NavigationItem.primaryItems, id: \.self) { item in
+                        sidebarRow(item)
+                    }
+                }
 
-                                    Spacer()
+                Section("Organize") {
+                    ForEach(NavigationItem.organizationItems, id: \.self) { item in
+                        sidebarRow(item)
+                    }
+                }
 
-                                    if queueManager.queueSize > 0 {
-                                        Text("\(queueManager.queueSize)")
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(queueManager.isProcessing ? Color.green : Color.blue)
-                                            .clipShape(Capsule())
-                                    }
-                                }
-                            }
-                        } else if item == .reviewInbox {
-                            NavigationLink(value: item) {
-                                HStack {
-                                    Label {
-                                        Text(item.rawValue)
-                                            .font(.system(.body, design: .rounded))
-                                    } icon: {
-                                        Image(systemName: item.icon)
-                                            .font(.title3)
-                                            .foregroundStyle(item.color)
-                                    }
-
-                                    Spacer()
-
-                                    if reviewModel.counts.pending > 0 {
-                                        Text("\(reviewModel.counts.pending)")
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.orange)
-                                            .clipShape(Capsule())
-                                    }
-                                }
-                            }
-                        } else {
-                            NavigationLink(value: item) {
-                                Label {
-                                    Text(item.rawValue)
-                                        .font(.system(.body, design: .rounded))
-                                } icon: {
-                                    Image(systemName: item.icon)
-                                        .font(.title3)
-                                        .foregroundStyle(item.color)
-                                }
-                            }
-                        }
+                Section("Activity") {
+                    ForEach(NavigationItem.activityItems, id: \.self) { item in
+                        sidebarRow(item)
                     }
                 }
             }
@@ -121,6 +70,47 @@ struct SidebarView: View {
             .accessibilityValue(selection == .settings ? "Selected" : "")
         }
         .frame(minWidth: 200)
+    }
+
+    private func sidebarRow(_ item: NavigationItem) -> some View {
+        NavigationLink(value: item) {
+            HStack {
+                Label {
+                    Text(item.rawValue)
+                        .font(.system(.body, design: .rounded))
+                } icon: {
+                    Image(systemName: item.icon)
+                        .font(.title3)
+                        .foregroundStyle(item.color)
+                }
+
+                Spacer()
+                sidebarBadge(item)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sidebarBadge(_ item: NavigationItem) -> some View {
+        if item == .queue && queueManager.queueSize > 0 {
+            Text("\(queueManager.queueSize)")
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(queueManager.isProcessing ? Color.green : Color.blue)
+                .clipShape(Capsule())
+        } else if item == .reviewInbox && reviewModel.counts.pending > 0 {
+            Text("\(reviewModel.counts.pending)")
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange)
+                .clipShape(Capsule())
+        }
     }
     
     private var storageWarningColor: Color {
@@ -173,8 +163,12 @@ enum NavigationItem: String, Hashable, CaseIterable {
     case settings = "Settings"
 
     /// Items shown in the sidebar
+    static let primaryItems: [NavigationItem] = [.record, .library, .search]
+    static let organizationItems: [NavigationItem] = [.dashboard, .meetings, .speakers]
+    static let activityItems: [NavigationItem] = [.reviewInbox, .queue]
+
     static var sidebarItems: [NavigationItem] {
-        [.dashboard, .search, .meetings, .record, .speakers, .reviewInbox, .queue]
+        primaryItems + organizationItems + activityItems
     }
 
     var icon: String {

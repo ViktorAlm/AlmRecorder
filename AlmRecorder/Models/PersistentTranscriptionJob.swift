@@ -225,13 +225,12 @@ extension PersistentTranscriptionJob {
         )
     }
     
-    /// Clean up stale jobs (heartbeat older than 5 minutes)
+    /// Recover every job left in `processing` by a previous app process. This runs only while a
+    /// fresh queue manager is being initialized, before it starts workers, so no row can belong to
+    /// the current process. Waiting five minutes stranded jobs after an otherwise normal app quit.
     static func markStaleJobsAsInterrupted(_ db: Database) throws -> Int {
-        let staleDate = Date().addingTimeInterval(-5 * 60) // 5 minutes ago
-        
         let staleJobs = try PersistentTranscriptionJob
             .filter(Columns.status == "processing")
-            .filter(Columns.lastHeartbeat < staleDate)
             .fetchAll(db)
         
         for job in staleJobs {

@@ -160,7 +160,7 @@ class AudioSegmentExtractor {
             try audioFile.read(into: buffer, frameCount: framesToRead)
             
             // Convert to Data
-            let data = pcmBufferToData(buffer)
+            let data = try pcmBufferToData(buffer)
             completion(.success(data))
             
         } catch {
@@ -203,52 +203,51 @@ class AudioSegmentExtractor {
         try audioFile.read(into: buffer, frameCount: framesToRead)
         
         // Convert to Data
-        return pcmBufferToData(buffer)
+        return try pcmBufferToData(buffer)
     }
     
-    private func pcmBufferToData(_ buffer: AVAudioPCMBuffer) -> Data {
+    private func pcmBufferToData(_ buffer: AVAudioPCMBuffer) throws -> Data {
         // Create a temporary file to write the audio data as WAV
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("wav")
-        
-        do {
-            // Create an audio file for writing
-            let audioFile = try AVAudioFile(
-                forWriting: tempURL,
-                settings: buffer.format.settings,
-                commonFormat: buffer.format.commonFormat,
-                interleaved: buffer.format.isInterleaved
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        // AVAudioFile patches the RIFF and data chunk lengths when it closes. Reading Data while
+        // the writer is still alive returns a superficially playable WAV whose header can claim
+        // only the first buffer (for example 4 KB of a multi-megabyte clip). Strict decoders such
+        // as llama.cpp/miniaudio then reject or truncate it.
+        var outputFile: AVAudioFile? = try AVAudioFile(
+            forWriting: tempURL,
+            settings: buffer.format.settings,
+            commonFormat: buffer.format.commonFormat,
+            interleaved: buffer.format.isInterleaved
+        )
+        try outputFile?.write(from: buffer)
+        outputFile = nil
+
+        let data = try Data(contentsOf: tempURL)
+        guard Self.hasFinalizedRIFFHeader(data) else {
+            logger.error(
+                "[AudioSegmentExtractor] WAV writer did not finalize its RIFF length "
+                    + "(\(data.count) bytes)"
             )
-            
-            // Write the buffer to the file
-            try audioFile.write(from: buffer)
-            
-            // Read the file data
-            let data = try Data(contentsOf: tempURL)
-            
-            // Clean up temp file
-            try? FileManager.default.removeItem(at: tempURL)
-            
-            return data
-            
-        } catch {
-            logger.error("[AudioSegmentExtractor] Failed to convert PCM buffer to WAV data: \(error)")
-            
-            // Fallback: return raw PCM data (won't work with AVAudioPlayer but better than nothing)
-            let audioFormat = buffer.format
-            let frameLength = buffer.frameLength
-            let bytesPerFrame = audioFormat.streamDescription.pointee.mBytesPerFrame
-            let dataSize = Int(frameLength) * Int(bytesPerFrame)
-            
-            if let channelData = buffer.floatChannelData {
-                return Data(bytes: channelData[0], count: dataSize)
-            } else if let channelData = buffer.int16ChannelData {
-                return Data(bytes: channelData[0], count: dataSize)
-            } else {
-                return Data()
-            }
+            throw AudioExtractionError.conversionFailed
         }
+        return data
+    }
+
+    static func hasFinalizedRIFFHeader(_ data: Data) -> Bool {
+        guard data.count >= 12,
+              data.prefix(4) == Data("RIFF".utf8),
+              data[8..<12] == Data("WAVE".utf8) else {
+            return false
+        }
+        let declaredSize = UInt32(data[4])
+            | (UInt32(data[5]) << 8)
+            | (UInt32(data[6]) << 16)
+            | (UInt32(data[7]) << 24)
+        return UInt64(declaredSize) + 8 == UInt64(data.count)
     }
     
     private func dataToPCMBuffer(_ data: Data) -> AVAudioPCMBuffer? {

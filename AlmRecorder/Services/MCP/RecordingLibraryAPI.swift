@@ -12,6 +12,7 @@ final class RecordingLibraryAPI: @unchecked Sendable {
         let writes: Bool
         let clientId: String
         let authorizationRevision: String
+        let privacyRevision: String
     }
 
     enum APIError: LocalizedError {
@@ -44,7 +45,7 @@ final class RecordingLibraryAPI: @unchecked Sendable {
     private let database = GRDBDatabaseManager.shared
     private let comments = GRDBRecordingCommentRepository()
     private let meetingNotes = GRDBMeetingNotesRepository()
-    private let semanticSearch = SemanticSearchService.shared
+    private let librarySearch = LibrarySearchService.shared
 
     private init() {}
 
@@ -123,14 +124,41 @@ final class RecordingLibraryAPI: @unchecked Sendable {
 
     private func libraryStatus(access: Access) throws -> MCPJSONValue {
         try database.read { db in
-            let recordingCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM recordings") ?? 0
-            let tagCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tags") ?? 0
+            let recordingCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)"
+            ) ?? 0
+            let tagCount = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(DISTINCT t.id)
+                    FROM tags t
+                    JOIN recording_tags rt ON rt.tag_id = t.id
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                      ON visible_r.id = rt.recording_id
+                    WHERE t.mcp_hidden = 0
+                """
+            ) ?? 0
             let commentCount = access.transcripts
-                ? (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM recording_comments") ?? 0)
+                ? (try Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM recording_comments c
+                        JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                          ON visible_r.id = c.recording_id
+                    """
+                ) ?? 0)
                 : nil
             let visibleUtteranceCount = try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM utterances WHERE is_hidden = 0"
+                sql: """
+                    SELECT COUNT(*)
+                    FROM utterances u
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                      ON visible_r.id = u.recording_id
+                    WHERE u.is_hidden = 0
+                """
             ) ?? 0
             let indexedUtteranceCount = try Int.fetchOne(
                 db,
@@ -138,6 +166,8 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                     SELECT COUNT(*)
                     FROM utterance_embeddings e
                     JOIN utterances u ON u.id = e.utterance_id
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                      ON visible_r.id = u.recording_id
                     WHERE u.is_hidden = 0
                 """
             ) ?? 0
@@ -148,7 +178,10 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                 && (visibleUtteranceCount == 0 || indexedUtteranceCount > 0)
             let newest: Date? = try Date.fetchOne(
                 db,
-                sql: "SELECT MAX(created_at) FROM recordings"
+                sql: """
+                    SELECT MAX(created_at)
+                    FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)
+                """
             )
             return .object([
                 "recording_count": .integer(Int64(recordingCount)),
@@ -206,7 +239,11 @@ final class RecordingLibraryAPI: @unchecked Sendable {
         return try database.read { db in
             guard let row = try Row.fetchOne(
                 db,
-                sql: "SELECT * FROM recordings WHERE external_id = ?",
+                sql: """
+                    SELECT *
+                    FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)
+                    WHERE external_id = ?
+                """,
                 arguments: [externalId]
             ), let recording = Recording(row: row) else {
                 throw APIError.notFound("Recording \(externalId) was not found.")
@@ -306,104 +343,50 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                 "complete": .bool(true)
             ])
         }
-        var exact: [SearchHit] = []
-        var semantic: [SearchHit] = []
-        var searchComplete = true
-        var semanticStrategy = "not_used"
-        var annCandidatesExamined = 0
-
-        if selectedMode == "keyword" || selectedMode == "hybrid" {
-            exact = try keywordSearch(
-                query: query,
-                recordingIds: recordingIds,
-                speakerIds: speakerIds,
-                limit: limit * 3
+        guard let libraryMode = LibrarySearchMode(rawValue: selectedMode) else {
+            throw APIError.invalidArguments("Unsupported search mode.")
+        }
+        let response: LibrarySearchResponse
+        do {
+            response = try await librarySearch.search(
+                LibrarySearchRequest(
+                    query: query,
+                    mode: libraryMode,
+                    limit: limit,
+                    recordingIds: recordingIds,
+                    speakerIds: speakerIds,
+                    allowSemanticFallback: false,
+                    forceANN: selectedMode == "ann"
+                )
+            )
+        } catch SemanticSearchError.noEmbeddingModel {
+            throw APIError.unavailable(
+                "Semantic search requires a model already loaded in AlmRecorder. Open Models in Settings to load it; MCP will not download one implicitly."
             )
         }
-        if selectedMode == "semantic" || selectedMode == "ann" || selectedMode == "hybrid" {
-            guard EmbeddingModelManager.shared.isModelLoaded else {
-                throw APIError.unavailable(
-                    "Semantic search requires a model already loaded in AlmRecorder. Open Models in Settings to load it; MCP will not download one implicitly."
-                )
-            }
-            let semanticResponse = try await semanticSearch.searchInRecordings(
-                query: query,
-                recordingIds: Array(recordingIds),
-                limit: min(max(limit * 3, 50), 500),
-                loadModelIfNeeded: false,
-                speakerIds: speakerIds,
-                forceANN: selectedMode == "ann"
+        try Task.checkCancellation()
+        let semanticStrategy = response.semanticStrategy?.rawValue ?? "not_used"
+        // The shared local HNSW index can examine vectors outside the MCP-visible
+        // scope before the recording-ID filter is applied. Do not disclose that
+        // raw global count to a remote client.
+        let annCandidatesExamined = 0
+        let searchComplete = response.semanticStrategy == .ann
+            ? false
+            : response.complete
+        let hits = response.hits.map {
+            SearchHit(
+                utterance: $0.utterance,
+                recording: $0.recording,
+                score: $0.score,
+                match: $0.match.rawValue,
+                field: $0.field.rawValue
             )
-            try Task.checkCancellation()
-            searchComplete = semanticResponse.complete
-            semanticStrategy = semanticResponse.strategy.rawValue
-            annCandidatesExamined = semanticResponse.strategy == .ann
-                ? semanticResponse.examinedCandidateCount
-                : 0
-            semantic = semanticResponse.results
-                .filter {
-                    !$0.utterance.isHidden
-                        && (speakerIds.isEmpty
-                            || $0.utterance.speakerUuid.map(speakerIds.contains) == true)
-                }
-                .map {
-                    SearchHit(
-                        utterance: $0.utterance,
-                        recording: $0.recording,
-                        score: Double($0.relevanceScore),
-                        match: "semantic",
-                        field: "transcript"
-                    )
-                }
         }
-
-        var byUtterance: [String: SearchHit] = [:]
-        if selectedMode == "hybrid" {
-            // Reciprocal-rank fusion keeps backend-specific scores from being compared directly.
-            for (rank, hit) in exact.enumerated() {
-                byUtterance[hit.identity] = SearchHit(
-                    utterance: hit.utterance,
-                    recording: hit.recording,
-                    score: 1.0 / Double(60 + rank + 1),
-                    match: "keyword",
-                    field: hit.field
-                )
-            }
-            for (rank, hit) in semantic.enumerated() {
-                let contribution = 1.0 / Double(60 + rank + 1)
-                if let current = byUtterance[hit.identity] {
-                    byUtterance[hit.identity] = SearchHit(
-                        utterance: hit.utterance,
-                        recording: hit.recording,
-                        score: current.score + contribution,
-                        match: "hybrid",
-                        field: hit.field
-                    )
-                } else {
-                    byUtterance[hit.identity] = SearchHit(
-                        utterance: hit.utterance,
-                        recording: hit.recording,
-                        score: contribution,
-                        match: "semantic",
-                        field: hit.field
-                    )
-                }
-            }
-        } else {
-            for hit in exact + semantic {
-                byUtterance[hit.identity] = hit
-            }
-        }
-        let hits = byUtterance.values.sorted {
-            $0.score == $1.score
-                ? $0.recording.createdAt > $1.recording.createdAt
-                : $0.score > $1.score
-        }.prefix(limit)
 
         return .object([
             "query": .string(query),
             "mode_requested": .string(requestedMode),
-            "mode": .string(selectedMode),
+            "mode": .string(response.actualMode.rawValue),
             "semantic_strategy": .string(semanticStrategy),
             "results": .array(hits.map(Self.searchHitValue)),
             "semantic_search_ready": .bool(
@@ -425,9 +408,12 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT t.*, COUNT(rt.recording_id) AS recording_count
+                    SELECT t.*, COUNT(visible_r.id) AS recording_count
                     FROM tags t
-                    LEFT JOIN recording_tags rt ON rt.tag_id = t.id
+                    JOIN recording_tags rt ON rt.tag_id = t.id
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                      ON visible_r.id = rt.recording_id
+                    WHERE t.mcp_hidden = 0
                     GROUP BY t.id
                     ORDER BY LOWER(t.name)
                 """
@@ -465,7 +451,10 @@ final class RecordingLibraryAPI: @unchecked Sendable {
         do {
             let matchingComments = try comments.list(
                 recordingExternalId: recordingId,
-                status: status
+                status: status,
+                authorizeRecording: { db, id in
+                    try MCPRecordingPrivacyPolicy.isRecordingVisible(db, id: id)
+                }
             )
             return .object([
                 "recording_id": .string(recordingId),
@@ -498,7 +487,11 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             }
             guard let recordingRow = try Row.fetchOne(
                 db,
-                sql: "SELECT id, updated_at FROM recordings WHERE external_id = ?",
+                sql: """
+                    SELECT id, updated_at
+                    FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)
+                    WHERE external_id = ?
+                """,
                 arguments: [recordingExternalId]
             ) else {
                 throw APIError.notFound("Recording \(recordingExternalId) was not found.")
@@ -510,7 +503,12 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             for identifier in identifiers {
                 guard let row = try Row.fetchOne(
                     db,
-                    sql: "SELECT * FROM tags WHERE external_id = ? OR LOWER(name) = LOWER(?)",
+                    sql: """
+                        SELECT *
+                        FROM tags
+                        WHERE mcp_hidden = 0
+                          AND (external_id = ? OR LOWER(name) = LOWER(?))
+                    """,
                     arguments: [identifier, identifier]
                 ), let tag = Tag(row: row), let tagId = tag.id else {
                     throw APIError.notFound("Tag \(identifier) was not found.")
@@ -553,11 +551,10 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             throw APIError.invalidArguments("Provide agenda and/or notes to update.")
         }
         let meetingExists = try database.read { db in
-            try Bool.fetchOne(
+            try MCPRecordingPrivacyPolicy.isMeetingVisible(
                 db,
-                sql: "SELECT EXISTS(SELECT 1 FROM meetings WHERE calendar_event_id = ?)",
-                arguments: [eventId]
-            ) ?? false
+                calendarEventId: eventId
+            )
         }
         guard meetingExists else {
             throw APIError.notFound("Calendar event \(eventId) was not found.")
@@ -578,6 +575,12 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                         content: true,
                         write: true
                     )
+                },
+                authorizeEvent: { db, eventId in
+                    try MCPRecordingPrivacyPolicy.isMeetingVisible(
+                        db,
+                        calendarEventId: eventId
+                    )
                 }
             )
             return try meetingNotesValue(eventId, notes: updated)
@@ -585,6 +588,8 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             throw APIError.conflict("Meeting notes changed since they were read. Read them again before updating.")
         } catch GRDBMeetingNotesRepository.MeetingNotesError.authorizationRevoked {
             throw APIError.forbidden("Content or write access was revoked before the note change committed.")
+        } catch GRDBMeetingNotesRepository.MeetingNotesError.eventNotFound {
+            throw APIError.notFound("Calendar event \(eventId) was not found.")
         } catch GRDBMeetingNotesRepository.MeetingNotesError.contentTooLarge {
             throw APIError.invalidArguments("Meeting notes exceed the documented size limit.")
         }
@@ -613,6 +618,9 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                         content: true,
                         write: true
                     )
+                },
+                authorizeRecording: { db, id in
+                    try MCPRecordingPrivacyPolicy.isRecordingVisible(db, id: id)
                 }
             )
             return Self.commentValue(comment)
@@ -650,6 +658,9 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                         content: true,
                         write: true
                     )
+                },
+                authorizeRecording: { db, recordingId in
+                    try MCPRecordingPrivacyPolicy.isRecordingVisible(db, id: recordingId)
                 }
             ))
         } catch {
@@ -679,6 +690,9 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                         content: true,
                         write: true
                     )
+                },
+                authorizeRecording: { db, recordingId in
+                    try MCPRecordingPrivacyPolicy.isRecordingVisible(db, id: recordingId)
                 }
             ))
         } catch {
@@ -710,7 +724,7 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                 .object([
                     "uri": .string("almrecorder://tags"),
                     "name": .string("AlmRecorder tags"),
-                    "description": .string("All recording tags and their usage counts"),
+                    "description": .string("Tags used by MCP-visible recordings and their usage counts"),
                     "mime_type": .string("application/json")
                 ])
             ]
@@ -762,7 +776,11 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             return try database.read { db in
                 guard let id = try Int64.fetchOne(
                     db,
-                    sql: "SELECT id FROM recordings WHERE external_id = ?",
+                    sql: """
+                        SELECT id
+                        FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation)
+                        WHERE external_id = ?
+                    """,
                     arguments: [recordingId]
                 ) else {
                     throw APIError.notFound("Recording \(recordingId) was not found.")
@@ -788,7 +806,10 @@ final class RecordingLibraryAPI: @unchecked Sendable {
         includeTranscriptTextFilter: Bool
     ) throws -> [Recording] {
         try database.read { db in
-            var sql = "SELECT DISTINCT r.* FROM recordings r"
+            var sql = """
+                SELECT DISTINCT r.*
+                FROM \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) r
+            """
             var conditions: [String] = []
             var values: [DatabaseValueConvertible?] = []
 
@@ -805,8 +826,11 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                         SELECT rt.recording_id
                         FROM recording_tags rt
                         JOIN tags t ON t.id = rt.tag_id
-                        WHERE t.external_id IN (\(placeholders))
-                           OR LOWER(t.name) IN (\(placeholders))
+                        WHERE t.mcp_hidden = 0
+                          AND (
+                              t.external_id IN (\(placeholders))
+                              OR LOWER(t.name) IN (\(placeholders))
+                          )
                         GROUP BY rt.recording_id
                         \(match == "all" ? "HAVING COUNT(DISTINCT t.id) = ?" : "")
                     )
@@ -935,123 +959,19 @@ final class RecordingLibraryAPI: @unchecked Sendable {
         let score: Double
         let match: String
         let field: String
-
-        var identity: String {
-            if let id = utterance.id { return "utterance:\(id)" }
-            return "recording:\(recording.id ?? 0):\(field)"
-        }
-    }
-
-    private func keywordSearch(
-        query: String,
-        recordingIds: Set<Int64>,
-        speakerIds: [String],
-        limit: Int
-    ) throws -> [SearchHit] {
-        guard !recordingIds.isEmpty else { return [] }
-        guard let pattern = FTS5Pattern(matchingAllTokensIn: query) else {
-            throw APIError.invalidArguments("query must contain at least one searchable token.")
-        }
-        return try database.read { db in
-            let placeholders = recordingIds.map { _ in "?" }.joined(separator: ",")
-            let speakerPlaceholders = speakerIds.map { _ in "?" }.joined(separator: ",")
-            var arguments: [DatabaseValueConvertible?] = Array(recordingIds)
-            arguments.append(pattern)
-            arguments.append(contentsOf: speakerIds)
-            arguments.append(limit)
-            let rows = try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT u.*, bm25(utterance_fts) AS mcp_fts_rank
-                    FROM utterance_fts
-                    JOIN utterances u ON u.id = utterance_fts.rowid
-                    JOIN recordings r ON r.id = u.recording_id
-                    WHERE u.recording_id IN (\(placeholders))
-                      AND u.is_hidden = 0
-                      AND utterance_fts MATCH ?
-                      \(speakerIds.isEmpty ? "" : "AND u.speaker_uuid IN (\(speakerPlaceholders))")
-                    ORDER BY mcp_fts_rank, r.created_at DESC, u.utterance_index
-                    LIMIT ?
-                """,
-                arguments: StatementArguments(arguments)
-            )
-            var hits = rows.compactMap { row -> SearchHit? in
-                guard let utterance = Utterance(row: row),
-                      let recordingRow = try? Row.fetchOne(
-                        db,
-                        sql: "SELECT * FROM recordings WHERE id = ?",
-                        arguments: [utterance.recordingId]
-                      ),
-                      let recording = Recording(row: recordingRow) else { return nil }
-                let rank: Double = row["mcp_fts_rank"] ?? 0
-                return SearchHit(
-                    utterance: utterance,
-                    recording: recording,
-                    score: max(0, -rank),
-                    match: "keyword",
-                    field: "transcript"
-                )
-            }
-
-            // A speaker-scoped query cannot attribute a recording-title hit to that speaker.
-            // Omit title-only matches rather than returning a hit that violates the filter.
-            if speakerIds.isEmpty {
-                var titleArguments: [DatabaseValueConvertible?] = Array(recordingIds)
-                titleArguments.append(pattern)
-                titleArguments.append(limit)
-                let titleRows = try Row.fetchAll(
-                    db,
-                    sql: """
-                        SELECT r.*, bm25(recording_title_fts, 5.0) AS mcp_fts_rank
-                        FROM recording_title_fts
-                        JOIN recordings r ON r.id = recording_title_fts.rowid
-                        WHERE r.id IN (\(placeholders))
-                          AND recording_title_fts MATCH ?
-                        ORDER BY mcp_fts_rank, r.created_at DESC
-                        LIMIT ?
-                    """,
-                    arguments: StatementArguments(titleArguments)
-                )
-                hits.append(contentsOf: titleRows.compactMap { row -> SearchHit? in
-                    guard let recording = Recording(row: row), let recordingId = recording.id else {
-                        return nil
-                    }
-                    let rank: Double = row["mcp_fts_rank"] ?? 0
-                    let titleUtterance = Utterance(
-                        id: nil,
-                        recordingId: recordingId,
-                        utteranceIndex: -1,
-                        startTime: 0,
-                        endTime: 0,
-                        speaker: nil,
-                        speakerUuid: nil,
-                        text: recording.title,
-                        confidence: nil
-                    )
-                    return SearchHit(
-                        utterance: titleUtterance,
-                        recording: recording,
-                        score: 1 + max(0, -rank),
-                        match: "keyword",
-                        field: "title"
-                    )
-                })
-            }
-            return Array(
-                hits.sorted {
-                    $0.score == $1.score
-                        ? $0.recording.createdAt > $1.recording.createdAt
-                        : $0.score > $1.score
-                }.prefix(limit)
-            )
-        }
     }
 
     private func semanticIndexStats() throws -> (visible: Int, indexed: Int, coverage: Double) {
         try database.read { db in
             let visible = try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM utterances WHERE is_hidden = 0"
+                sql: """
+                    SELECT COUNT(*)
+                    FROM utterances u
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                      ON visible_r.id = u.recording_id
+                    WHERE u.is_hidden = 0
+                """
             ) ?? 0
             let indexed = try Int.fetchOne(
                 db,
@@ -1059,6 +979,8 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                     SELECT COUNT(*)
                     FROM utterance_embeddings e
                     JOIN utterances u ON u.id = e.utterance_id
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) visible_r
+                      ON visible_r.id = u.recording_id
                     WHERE u.is_hidden = 0
                 """
             ) ?? 0
@@ -1115,6 +1037,15 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             )
         }
         if let eventId {
+            let visible = try database.read { db in
+                try MCPRecordingPrivacyPolicy.isMeetingVisible(
+                    db,
+                    calendarEventId: eventId
+                )
+            }
+            guard visible else {
+                throw APIError.notFound("Calendar event \(eventId) was not found.")
+            }
             return [eventId]
         }
         let recordingExternalId = recordingId!
@@ -1125,7 +1056,8 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                     SELECT m.calendar_event_id
                     FROM meetings m
                     JOIN recording_meetings rm ON rm.meeting_id = m.id
-                    JOIN recordings r ON r.id = rm.recording_id
+                    JOIN \(MCPRecordingPrivacyPolicy.visibleRecordingsRelation) r
+                      ON r.id = rm.recording_id
                     WHERE r.external_id = ? AND rm.is_dismissed = 0
                     ORDER BY m.start_date
                 """,
@@ -1142,8 +1074,14 @@ final class RecordingLibraryAPI: @unchecked Sendable {
         _ eventId: String,
         notes supplied: GRDBMeetingNotesRepository.MeetingNotes? = nil
     ) throws -> MCPJSONValue {
-        guard let meeting = try database.read({ db in
-            try Row.fetchOne(
+        guard let meeting = try database.read({ db -> Row? in
+            guard try MCPRecordingPrivacyPolicy.isMeetingVisible(
+                db,
+                calendarEventId: eventId
+            ) else {
+                return nil
+            }
+            return try Row.fetchOne(
                 db,
                 sql: """
                     SELECT title, start_date, end_date
@@ -1204,7 +1142,7 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                 "keyword": .string("FTS5/BM25 lexical search over visible transcript text and titles."),
                 "exact": .string("Deprecated alias for keyword; it is not literal string equality."),
                 "semantic": .string("Vector-only search; exact cosine is used for small filtered sets."),
-                "ann": .string("Vector-only HNSW ANN; inspect complete and ann_candidates_examined."),
+                "ann": .string("Vector-only HNSW ANN. Shared-index candidate counts are privacy-redacted and complete is conservative."),
                 "hybrid": .string("Reciprocal-rank fusion of keyword and vector ranks."),
                 "auto": .string("Hybrid when a loaded model and usable filtered index are ready; otherwise keyword.")
             ]),
@@ -1219,7 +1157,10 @@ final class RecordingLibraryAPI: @unchecked Sendable {
             "permissions": .object([
                 "metadata": .string("Enabled MCP can read titles, dates, tags, speakers, and meeting linkage."),
                 "content": .string("Required for transcript text/search, summaries, notes, and comments."),
-                "write": .string("Required in addition to content where a note/comment write touches content.")
+                "write": .string("Required in addition to content where a note/comment write touches content."),
+                "recording_privacy": .string(
+                    "Recordings disabled for MCP, or carrying a tag that hides recordings from MCP, are treated as nonexistent across tools, resources, search, statistics, notes, comments, and writes."
+                )
             ]),
             "pagination": .string(
                 "For list_recordings and resources/list, pass next_cursor unchanged with the same filters."
@@ -1314,6 +1255,7 @@ final class RecordingLibraryAPI: @unchecked Sendable {
                 SELECT t.* FROM tags t
                 JOIN recording_tags rt ON rt.tag_id = t.id
                 WHERE rt.recording_id = ?
+                  AND t.mcp_hidden = 0
                 ORDER BY LOWER(t.name)
             """,
             arguments: [recordingId]

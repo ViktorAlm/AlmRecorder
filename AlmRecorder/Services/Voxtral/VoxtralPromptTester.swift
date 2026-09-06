@@ -140,8 +140,6 @@ class VoxtralPromptTester: ObservableObject {
         }
         
         var jobIds: [UUID] = []
-        let appState = AppState.shared
-        
         // Submit jobs sequentially with small delays to avoid blocking UI
         for (index, config) in testConfigs.enumerated() {
             // Small delay between submissions to let UI update
@@ -151,7 +149,7 @@ class VoxtralPromptTester: ObservableObject {
             
             // Submit on main actor since AppState operations need it
             let job = await MainActor.run {
-                appState.runPromptTest(
+                AppState.shared.runPromptTest(
                     audioFile: selectedAudioPath,
                     config: config,
                     modelKey: modelKey,

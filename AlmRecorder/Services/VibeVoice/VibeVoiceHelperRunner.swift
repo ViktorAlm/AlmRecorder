@@ -5,20 +5,57 @@ struct VibeVoiceHelperCommand: Equatable {
     let prefixArguments: [String]
 }
 
+private final class VibeVoiceMemoryAbortState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedReason: String?
+
+    func setIfEmpty(_ reason: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard storedReason == nil else { return false }
+        storedReason = reason
+        return true
+    }
+
+    var reason: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedReason
+    }
+}
+
 /// Executes the separately packaged MLX runtime. The stable file-based JSON contract isolates
 /// Python/MLX logs from machine-readable output and lets cancellation terminate the child process.
 final class VibeVoiceHelperRunner: @unchecked Sendable {
+    typealias MemoryTelemetryHandler =
+        @Sendable (_ currentBytes: UInt64?, _ availableSystemBytes: UInt64?) -> Void
+
     private let processLock = NSLock()
     private var activeProcess: Process?
+    private let telemetryLock = NSLock()
+    private var memoryTelemetryHandler: MemoryTelemetryHandler?
+    private let logger = VoxtralLogger.shared
+
+    func setMemoryTelemetryHandler(_ handler: MemoryTelemetryHandler?) {
+        telemetryLock.lock()
+        memoryTelemetryHandler = handler
+        telemetryLock.unlock()
+    }
 
     func probe() async throws {
         _ = try await run(arguments: ["probe"])
     }
 
-    func run(arguments: [String]) async throws -> Data {
+    func run(
+        arguments: [String],
+        resourceProfile: TranscriptionResourceProfile? = nil
+    ) async throws -> Data {
         try await withTaskCancellationHandler {
             try await Task.detached(priority: .userInitiated) {
-                try self.runBlocking(arguments: arguments)
+                try self.runBlocking(
+                    arguments: arguments,
+                    resourceProfile: resourceProfile
+                )
             }.value
         } onCancel: {
             self.cancel()
@@ -31,6 +68,12 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
         processLock.unlock()
         guard let process, process.isRunning else { return }
         process.terminate()
+        let pid = process.processIdentifier
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+            if process.isRunning {
+                kill(pid, SIGKILL)
+            }
+        }
     }
 
     static func resolveCommand(
@@ -56,11 +99,25 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
             return VibeVoiceHelperCommand(executableURL: binary, prefixArguments: [])
         }
 
-        let bundledScript = Bundle.main.url(
+        // A packaged app exposes copied resources through Bundle.main, while SwiftPM tests and
+        // `swift run` expose the same files through Bundle.module. Always prefer either current
+        // resource over the protocol copy left behind by an older runtime installation.
+        let bundledScript: URL?
+        if let packaged = Bundle.main.url(
             forResource: "vibevoice_helper",
             withExtension: "py",
             subdirectory: "Python"
-        )
+        ) {
+            bundledScript = packaged
+        } else {
+            // Keep Bundle.module lazy: distribution builds intentionally omit the duplicate
+            // AlmRecorder_AlmRecorder.bundle after copying its resources into Bundle.main.
+            bundledScript = Bundle.module.url(
+                forResource: "vibevoice_helper",
+                withExtension: "py",
+                subdirectory: "Python"
+            )
+        }
         let bundledPython = Bundle.main.resourceURL?
             .appendingPathComponent("VibeVoiceRuntime/bin/python3")
         if let script = bundledScript,
@@ -78,6 +135,16 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
         )[0].appendingPathComponent("AlmRecorder/VibeVoiceRuntime")
         let installedPython = appSupport.appendingPathComponent("bin/python3")
         let installedScript = appSupport.appendingPathComponent("vibevoice_helper.py")
+        // Keep the isolated, pinned Python environment in Application Support while taking the
+        // helper protocol from the current app bundle. This lets app updates evolve the stable
+        // bridge (including realtime serve mode) without reinstalling 400+ MB of Python packages.
+        if let bundledScript,
+           fileManager.isExecutableFile(atPath: installedPython.path) {
+            return VibeVoiceHelperCommand(
+                executableURL: installedPython,
+                prefixArguments: [bundledScript.path]
+            )
+        }
         if fileManager.isExecutableFile(atPath: installedPython.path),
            fileManager.fileExists(atPath: installedScript.path) {
             return VibeVoiceHelperCommand(
@@ -100,7 +167,10 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
         return nil
     }
 
-    private func runBlocking(arguments: [String]) throws -> Data {
+    private func runBlocking(
+        arguments: [String],
+        resourceProfile: TranscriptionResourceProfile?
+    ) throws -> Data {
         guard let command = Self.resolveCommand() else {
             throw TranscriptionError.transcriptionFailed(
                 "VibeVoice runtime is not installed. Install it from Settings → Models."
@@ -124,6 +194,12 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONUNBUFFERED"] = "1"
         environment["TOKENIZERS_PARALLELISM"] = "false"
+        // A GUI app launched via LaunchServices (Finder/Dock/Spotlight) — unlike one launched from
+        // a Terminal — inherits a minimal PATH that excludes Homebrew, so mlx_audio's ffmpeg
+        // shell-out fails with "ffmpeg not found!" even when `brew install ffmpeg` put it on the
+        // user's own PATH. Prepend both Homebrew prefixes (Apple Silicon + Intel) unconditionally.
+        let homebrewPaths = "/opt/homebrew/bin:/usr/local/bin"
+        environment["PATH"] = homebrewPaths + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
         process.environment = environment
 
         processLock.lock()
@@ -133,19 +209,75 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
             processLock.lock()
             if activeProcess === process { activeProcess = nil }
             processLock.unlock()
+            ChildProcessReaper.shared.untrack(process)
             try? logHandle.close()
         }
 
         try process.run()
+        ChildProcessReaper.shared.track(process, label: "vibevoice")
+
+        let memoryAbort = VibeVoiceMemoryAbortState()
+        let memoryMonitor: DispatchSourceTimer?
+        if let resourceProfile {
+            let monitor = DispatchSource.makeTimerSource(
+                queue: DispatchQueue(
+                    label: "com.almrecorder.vibevoice.memory-monitor",
+                    qos: .userInitiated
+                )
+            )
+            monitor.schedule(deadline: .now() + 2, repeating: 2)
+            monitor.setEventHandler { [weak self, weak process] in
+                guard let self, let process, process.isRunning else { return }
+                self.reportMemory(
+                    currentBytes: SystemMemoryDiagnostics.physicalFootprint(
+                        pid: process.processIdentifier
+                    ),
+                    availableSystemBytes: SystemMemoryGate.memorySnapshot()?.availableBytes
+                )
+                guard let reason = SystemMemoryGate.shared.transcriptionEmergencyReason(
+                        profile: resourceProfile
+                      ),
+                      memoryAbort.setIfEmpty(reason) else {
+                    return
+                }
+                self.logger.error(
+                    "[VibeVoice] Emergency memory stop: \(reason) — terminating pid \(process.processIdentifier)"
+                )
+                process.terminate()
+                let pid = process.processIdentifier
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                    deadline: .now() + 2
+                ) {
+                    if process.isRunning {
+                        kill(pid, SIGKILL)
+                    }
+                }
+            }
+            monitor.activate()
+            memoryMonitor = monitor
+        } else {
+            memoryMonitor = nil
+        }
+        defer {
+            memoryMonitor?.setEventHandler {}
+            memoryMonitor?.cancel()
+        }
+
         process.waitUntilExit()
         try? logHandle.synchronize()
         let log = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+        if let reason = memoryAbort.reason {
+            throw TranscriptionError.resourcesUnavailable(
+                "VibeVoice was stopped before the Mac ran out of memory: \(reason)"
+            )
+        }
         guard process.terminationStatus == 0 else {
             if Task.isCancelled {
                 throw CancellationError()
             }
             let detail = String(log.suffix(4_000))
             if BackgroundGPUAdmission.isMetalOOM(detail) {
+                SystemMemoryGate.shared.reportMetalOOM(source: "VibeVoice MLX")
                 throw TranscriptionError.gpuOutOfMemory(detail)
             }
             throw TranscriptionError.processFailed(
@@ -156,5 +288,15 @@ final class VibeVoiceHelperRunner: @unchecked Sendable {
             throw TranscriptionError.invalidResponse
         }
         return try Data(contentsOf: outputURL)
+    }
+
+    private func reportMemory(
+        currentBytes: UInt64?,
+        availableSystemBytes: UInt64?
+    ) {
+        telemetryLock.lock()
+        let handler = memoryTelemetryHandler
+        telemetryLock.unlock()
+        handler?(currentBytes, availableSystemBytes)
     }
 }

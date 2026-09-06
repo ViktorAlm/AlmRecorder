@@ -33,6 +33,7 @@ final class RecordingInsightsQueueManager: ObservableObject {
     private let gemmaModels = GemmaModelManager()
     private var cancellables = Set<AnyCancellable>()
     private var processingTask: Task<Void, Never>?
+    private var processingGeneration: UUID?
     private let maxRetries = 3
     private var maintenanceTimer: Timer?
     private let maintenanceInterval: TimeInterval = 600 // 10 minutes
@@ -100,14 +101,22 @@ final class RecordingInsightsQueueManager: ObservableObject {
     // MARK: - Processing control
 
     func startProcessing() {
-        guard !isProcessing else { return }
+        guard processingGeneration == nil else { return }
+        // Latch before the detached task starts so a burst of enqueue/maintenance calls cannot
+        // create multiple workers for the same logical GPU consumer.
+        let generation = UUID()
+        processingGeneration = generation
+        isProcessing = true
         // Task.detached so processing never inherits @MainActor (GPUResourceManager calls this).
-        processingTask = Task.detached { [weak self] in await self?.processQueue() }
+        processingTask = Task.detached { [weak self] in
+            await self?.processQueue(generation: generation)
+        }
     }
 
     func stopProcessing() {
         processingTask?.cancel()
         processingTask = nil
+        processingGeneration = nil
         isProcessing = false
         // Kill any in-flight llama-cli so a preempting (higher-priority) consumer gets the GPU promptly.
         LLMTextService.shared.cancel()
@@ -178,8 +187,7 @@ final class RecordingInsightsQueueManager: ObservableObject {
 
     // MARK: - Worker loop
 
-    private func processQueue() async {
-        await MainActor.run { isProcessing = true }
+    private func processQueue(generation: UUID) async {
         var gpuHeld = false
 
         while !Task.isCancelled {
@@ -212,6 +220,9 @@ final class RecordingInsightsQueueManager: ObservableObject {
 
         if gpuHeld { await MainActor.run { GPUResourceManager.shared.release(.insights) } }
         await MainActor.run {
+            guard processingGeneration == generation else { return }
+            processingGeneration = nil
+            processingTask = nil
             isProcessing = false
             currentJob = nil
             currentStatus = ""
@@ -286,7 +297,7 @@ final class RecordingInsightsQueueManager: ObservableObject {
             return requeued(job)
         }
         // Metal OOM is systemic, not the job's fault: requeue without burning retry budget.
-        // SystemMemoryGate's cooldown (fed by the process layer) delays the relaunch by minutes.
+        // SystemMemoryGate's escalating backoff (fed by the process layer) delays the relaunch.
         if case TranscriptionError.gpuOutOfMemory = error {
             return requeued(job)
         }
